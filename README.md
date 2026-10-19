@@ -148,10 +148,46 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 ## 已知限制
 
 - **不能在 macOS 上构建。** Doona 源码含仅大小写不同的文件，构建脚本会主动探测并拒绝在大小写不敏感的文件系统上继续。
-- **Geo 数据 feed 仍指向第三方。** `release.yml` 默认用 `kenzok8/wall` 作为额外 feed 源提供 `v2ray-geoip` / `v2ray-geosite`。官方 `openwrt/packages` 的 `net/v2ray-geodata` 产出同名包，且在 25.12.4 的全部 6 个目标架构上都有二进制；把仓库变量 `GEO_FEED` 置空即可改用官方源，但需要一次 CI 构建验证。
+- **Geo 数据 feed 仍指向第三方。** 仓库变量 `EXTRA_FEEDS` 指向 `kenzok8/wall`，由它提供 `v2ray-geoip` / `v2ray-geosite`。官方 `openwrt/packages` 的 `net/v2ray-geodata` 产出同名包，且在 25.12.4 的全部 6 个目标架构上都有二进制；**删掉这个变量**即可改用 SDK 默认的官方源，但需要一次 CI 构建验证。
 - **打包 action 已改用官方仓库。** `openwrt/gh-action-sdk` 与原来的 fork 在被 pin 的提交上完全一致，因此换成官方源没有任何行为变化，同时去掉了对个人仓库的依赖。
 - **签名更新源需要外部引导。** 内核的受签名更新通道读取 `/etc/honk/update-trust/feed.url`，该文件由仓库外的流程写入，仓库内没有写入者。
 - **实机行为未在本仓库验证。** 结构检查（`scripts/check.sh`）只覆盖语法与静态一致性，OpenWrt 上的实际行为需要在设备上验证。
+
+---
+
+## 仓库设置
+
+发布流水线需要两组设置，缺任何一组都不会阻断构建。
+
+**Secrets**（R2 凭据，不配则跳过 R2 上传，发布仍留在 GitHub Releases）：
+
+| 名称 | 用途 |
+|---|---|
+| `R2_ACCESS_KEY_ID` | R2 访问密钥 ID |
+| `R2_SECRET_ACCESS_KEY` | R2 访问密钥 |
+| `R2_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
+| `R2_BUCKET` | 存放软件源的 bucket |
+
+凭据从仓库外的文件读入，值不进参数列表也不进 shell 历史：
+
+```sh
+mkdir -p ~/.config/honk
+cat > ~/.config/honk/r2-secrets <<'EOF'
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
+R2_BUCKET=...
+EOF
+chmod 600 ~/.config/honk/r2-secrets
+bash scripts/set-r2-secrets.sh
+```
+
+**Variables**（非敏感，仓库设置页可改）：
+
+| 名称 | 默认 | 用途 |
+|---|---|---|
+| `EXTRA_FEEDS` | `src-git\|wall\|https://github.com/kenzok8/wall` | Geo 数据 feed；删掉即改用 SDK 默认的官方源 |
+| `AGGREGATE_FEED_REPOSITORY` | 空 | 聚合 feed 的目标仓库；为空则不触发聚合 |
 
 ---
 

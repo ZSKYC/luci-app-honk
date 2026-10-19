@@ -192,9 +192,11 @@ jobs:
           FEEDNAME: honk
           PACKAGES: honk luci-app-honk
           # wall supplies v2ray-geoip / v2ray-geosite (subpackages of v2ray-geodata).
-          # The official packages feed carries the same packages; set the
-          # repository variable GEO_FEED to an empty value to use it instead.
-          EXTRA_FEEDS: ${{ vars.GEO_FEED || 'src-git|wall|https://github.com/kenzok8/wall' }}
+          # An empty value leaves the SDK on its default feeds, where
+          # openwrt/packages carries the same packages. The repository variable
+          # EXTRA_FEEDS holds the feed spec; removing the variable switches to
+          # the default feeds.
+          EXTRA_FEEDS: ${{ vars.EXTRA_FEEDS }}
           NO_REFRESH_CHECK: true
           IGNORE_ERRORS: false
           INDEX: 1

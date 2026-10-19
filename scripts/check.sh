@@ -259,6 +259,17 @@ grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
 	exit 1
 }
 
+# The R2 credentials are read from a file outside the repository. The helper
+# must never read them from the tree, and the tree must not carry one.
+test -f scripts/set-r2-secrets.sh
+bash -n scripts/set-r2-secrets.sh
+grep -Fq 'HONK_R2_SECRETS' scripts/set-r2-secrets.sh
+grep -Fq 'must be mode 600' scripts/set-r2-secrets.sh
+! grep -RIlE 'R2_SECRET_ACCESS_KEY *= *[A-Za-z0-9]' . --exclude-dir=.git 2>/dev/null | grep -q . || {
+	echo 'a credential value is present in the working tree' >&2
+	exit 1
+}
+
 if command -v msgfmt >/dev/null 2>&1; then
 	msgfmt --check -o /dev/null luci-app-honk/po/zh-cn/honk.po
 fi
