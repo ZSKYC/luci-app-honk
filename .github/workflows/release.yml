@@ -75,17 +75,25 @@ jobs:
 
       # mlugg/setup-zig still targets the Node 20 runtime upstream and has no
       # Node 24 release, so install Zig from the official tarball instead.
+      # The whole distribution directory has to go on PATH, not just the
+      # binary: zig locates its bundled `lib/` relative to the executable and
+      # aborts with "unable to find zig installation directory" otherwise.
       # Pinned version + SHA256 from ci/pins.env, same shape as the rclone
       # install; ci/build-core.sh re-asserts `zig version` against the pin.
       - name: Install Zig
         run: |
           set -euo pipefail
           source ci/pins.env
+          dest="/opt/zig-${ZIG_VERSION}"
           curl -fsSL -o zig.tar.xz "$ZIG_URL"
           echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
-          tar -xJf zig.tar.xz
-          sudo install -m 0755 "zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
-          zig version
+          sudo mkdir -p "$dest"
+          sudo tar -xJf zig.tar.xz -C "$dest" --strip-components=1
+          # GITHUB_PATH only affects later steps; assert here so a broken
+          # install fails in this step instead of deep inside cc-rs.
+          test -d "$dest/lib" || { echo "zig lib/ missing from $dest" >&2; exit 1; }
+          test "$("$dest/zig" version)" = "$ZIG_VERSION"
+          echo "$dest" >> "$GITHUB_PATH"
 
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ripgrep zstd
