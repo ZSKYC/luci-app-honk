@@ -531,13 +531,40 @@ jobs:
       contents: read
 
     steps:
+      # R2 hosting is optional: the release itself is produced by the `release`
+      # job and `scripts/install.sh` reads GitHub Releases. When the four R2
+      # secrets are absent this job reports why and stops before spending time
+      # on artifact download / rclone install. A job-level `if:` cannot read
+      # the secrets context, so the gate lives here as a step output.
+      - name: Check R2 credentials
+        id: r2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          missing=""
+          for name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET; do
+            [ -n "${!name}" ] || missing="${missing}${name} "
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::R2 upload disabled; missing secrets: ${missing% }"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download artifacts
+        if: steps.r2.outputs.enabled == 'true'
         uses: actions/download-artifact@v6
         with:
           path: artifacts
           pattern: packages-*
 
       - name: Organize feed structure
+        if: steps.r2.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           mkdir -p feed
@@ -572,6 +599,7 @@ jobs:
       # Install rclone in its own step that holds NO secrets, so a tampered
       # download can never read the R2 keys. Pinned version + checksum verify.
       - name: Install rclone (pinned)
+        if: steps.r2.outputs.enabled == 'true'
         env:
           RCLONE_VER: "1.69.1"
         run: |
@@ -586,6 +614,7 @@ jobs:
           rclone version
 
       - name: Upload to Cloudflare R2
+        if: steps.r2.outputs.enabled == 'true'
         env:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

@@ -157,9 +157,20 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 
 ## 仓库设置
 
-发布流水线需要两组设置，缺任何一组都不会阻断构建。
+发布流水线只需要一组仓库变量，没有必配 secret。
 
-**Secrets**（R2 凭据，不配则跳过 R2 上传，发布仍留在 GitHub Releases）：
+**Variables**（非敏感，仓库设置页可改）：
+
+| 名称 | 默认 | 用途 |
+|---|---|---|
+| `EXTRA_FEEDS` | `src-git\|wall\|https://github.com/kenzok8/wall` | Geo 数据 feed；删掉即改用 SDK 默认的官方源 |
+| `AGGREGATE_FEED_REPOSITORY` | 空 | 聚合 feed 的目标仓库；为空则不触发聚合 |
+
+### 软件源即 GitHub Releases
+
+`scripts/install.sh` 从 GitHub Releases API 读取安装包，不依赖任何对象存储，
+`upload_feed` job 是叶子节点——没人 `needs` 它。因此下面的 Cloudflare R2
+凭据**当前不配置，这是预期状态**：
 
 | 名称 | 用途 |
 |---|---|
@@ -168,7 +179,10 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 | `R2_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` |
 | `R2_BUCKET` | 存放软件源的 bucket |
 
-凭据从仓库外的文件读入，值不进参数列表也不进 shell 历史：
+四个值缺任意一个，`upload_feed` job 就在第一步打印 warning 并结束，
+不下载 artifacts、不装 rclone；流水线仍为绿色。
+
+若以后要启用，凭据从仓库外的文件读入，值不进参数列表也不进 shell 历史：
 
 ```sh
 mkdir -p ~/.config/honk
@@ -182,12 +196,13 @@ chmod 600 ~/.config/honk/r2-secrets
 bash scripts/set-r2-secrets.sh
 ```
 
-**Variables**（非敏感，仓库设置页可改）：
+### 受签名的更新通道尚未启用
 
-| 名称 | 默认 | 用途 |
-|---|---|---|
-| `EXTRA_FEEDS` | `src-git\|wall\|https://github.com/kenzok8/wall` | Geo 数据 feed；删掉即改用 SDK 默认的官方源 |
-| `AGGREGATE_FEED_REPOSITORY` | 空 | 聚合 feed 的目标仓库；为空则不触发聚合 |
+设备端 `honk/files/update.sh` 要求设备上存在 `/etc/honk/update-trust/feed.url`
+与 `manifest.pub`，并校验 usign 签名的 `manifest.json`。仓库内目前既没有写入
+`feed.url` 的步骤，也没有签名步骤（发布端只生成未签名的
+`release-manifest.json`）。设备端的行为是诚实失败：返回
+`trusted_feed_unavailable`，不会装未验证的包。启用前需要先补上签名链路。
 
 ---
 
