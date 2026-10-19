@@ -34,23 +34,6 @@ const callSettings = rpc.declare({
 	expect: { '': {} }
 });
 
-const callAddSubscription = rpc.declare({
-	object: 'honk',
-	method: 'add_subscription',
-	params: [ 'name', 'url' ],
-	expect: { '': {} }
-});
-const callAddNodes = rpc.declare({
-	object: 'honk',
-	method: 'add_nodes',
-	params: [ 'links' ],
-	expect: { '': {} }
-});
-const callImportDae = rpc.declare({
-	object: 'honk',
-	method: 'import_dae',
-	expect: { '': {} }
-});
 const callRepair = rpc.declare({ object: 'honk', method: 'repair', expect: { '': {} } });
 const callBackup = rpc.declare({ object: 'honk', method: 'backup', expect: { '': {} } });
 const callRestore = rpc.declare({ object: 'honk', method: 'restore', expect: { '': {} } });
@@ -85,41 +68,49 @@ function installStyles() {
 	pageStylesInstalled = true;
 }
 
-function localWebUi(status) {
-	if (!status || !status.initialized || !status.running || !status.api_ready || !status.api_url)
-		return null;
+function isIpLiteral(host) {
+	const bare = String(host || '').replace(/^\[|\]$/g, '');
+	if (!bare)
+		return false;
+	if (bare.indexOf(':') >= 0)
+		return true;
+	const octets = bare.split('.');
+	return octets.length === 4 && octets.every(function(part) { return /^\d{1,3}$/.test(part) && Number(part) <= 255; });
+}
 
+function authorityHost(host) {
+	const bare = String(host || '').replace(/^\[|\]$/g, '');
+	return bare.indexOf(':') >= 0 ? '[' + bare + ']' : bare;
+}
+
+function hostFromApiUrl(apiUrl) {
 	try {
-		const raw = String(status.api_url);
-		const authority = raw.match(/^https?:\/\/([^/?#]+)/i);
-		if (!authority || authority[1].indexOf('@') >= 0)
-			return null;
-
-		const portMatch = authority[1].match(/:(\d+)$/);
-		const url = new URL(raw);
-		const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-		const port = portMatch ? Number(portMatch[1]) : 0;
-		if (!portMatch || !Number.isInteger(port) || port < 1 || port > 65535 ||
-			url.protocol !== 'http:' && url.protocol !== 'https:' ||
-			url.username || url.password || url.search || url.hash)
-			return null;
-
-		const octets = hostname.split('.');
-		let localIPv4 = false;
-		if (octets.length === 4 && octets.every(function(part) { return /^\d{1,3}$/.test(part) && Number(part) <= 255; })) {
-			const ip = octets.map(Number);
-			localIPv4 = ip[0] === 10 || ip[0] === 127 || ip[0] === 192 && ip[1] === 168 ||
-				ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31 || ip[0] === 169 && ip[1] === 254;
-		}
-		const localIPv6 = hostname === '::1' || /^f[cd][0-9a-f:]*$/.test(hostname) || /^fe[89ab][0-9a-f:]*$/.test(hostname);
-		if (!localIPv4 && !localIPv6)
-			return null;
-
-		return url.origin.replace(/\/$/, '') + '/ui/';
+		return new URL(String(apiUrl || '')).hostname || '';
 	}
 	catch (e) {
-		return null;
+		return '';
 	}
+}
+
+function localWebUi(status) {
+	if (!status || !status.initialized || !status.running || !status.api_ready)
+		return null;
+
+	const port = Number(status.listen_port);
+	if (!Number.isInteger(port) || port < 1 || port > 65535)
+		return null;
+
+	// The core binds the native API to every interface, so the panel is reached
+	// through the address the browser already uses for the router. A wildcard
+	// bind accepts only an IP literal or localhost as the Host, so a name the
+	// browser used falls back to the address the core reports.
+	let host = (window.location && window.location.hostname) || '';
+	if (!isIpLiteral(host) && host !== 'localhost')
+		host = hostFromApiUrl(status.api_url);
+	if (!host)
+		return null;
+
+	return 'http://' + authorityHost(host) + ':' + port + '/ui/';
 }
 
 function tokenMessage(token) {
@@ -162,31 +153,7 @@ function tokenMessage(token) {
 		reset_failed_rollback_failed: _('Reset failed and automatic recovery did not finish. Run system recovery before retrying.'),
 		restore_failed_rollback_failed: _('Restore failed and automatic recovery did not finish. Run system recovery before retrying.'),
 		logs_unavailable: _('Honk logs are unavailable.'),
-		unsupported_core: _('This installed core does not support the requested import operation.'),
 		invalid_request: _('The import request is incomplete or invalid.'),
-		import_failed: _('The core could not prepare this import preview.'),
-		share_links_too_large: _('Share links exceed the 16 KiB per request limit.'),
-		share_links_invalid_or_conflicting: _('A share link is invalid or conflicts with an existing node. Review the input and try again.'),
-		subscription_invalid: _('The subscription name or URL is invalid.'),
-		subscription_invalid_or_conflicting: _('The subscription is invalid or its name already exists.'),
-		subscription_no_nodes: _('The subscription returned no usable nodes. The configuration was not changed.'),
-		subscription_added: _('Subscription saved with usable nodes.'),
-		nodes_added: _('Nodes saved.'),
-		reload_failed_rolled_back: _('Honk could not restart. The previous configuration and service were restored.'),
-		reload_and_rollback_failed: _('Honk could not restart or restore the previous service. Check its status and backup.'),
-		dae_imported: _('Configuration imported and Honk reloaded.'),
-		config_missing: _('The configuration file is missing.'),
-		config_write_failed: _('Could not write the configuration file.'),
-		dae_too_large: _('The dae file exceeds the 2 MiB limit.'),
-		dae_invalid_or_unsupported: _('The dae file contains invalid sections or unsupported includes.'),
-		candidate_invalid: _('Honk could not load the proposed configuration.'),
-		candidate_rejected: _('The imported configuration failed core validation.'),
-		source_changed: _('Honk or Doona changed the configuration during this operation. Try again.'),
-		preview_expired: _('The preview expired. Create a new preview.'),
-		preview_corrupt: _('The saved preview is damaged. Create a new preview.'),
-		dae_upload_unavailable: _('The dae upload is missing or unavailable. Upload the file again.'),
-		dae_upload_invalid: _('The uploaded dae file is invalid.'),
-		dae_upload_changed: _('The uploaded dae file changed. Upload it again.'),
 		upload_unavailable: _('A private upload location could not be prepared.'),
 		settings_write_failed: _('Could not save Honk settings.'),
 		curl_missing: _('The curl command is missing. Install the curl package and try again.'),
@@ -290,9 +257,6 @@ return baseclass.extend({
 	stop: callStop,
 	restart: callRestart,
 	settings: callSettings,
-	addSubscription: callAddSubscription,
-	addNodes: callAddNodes,
-	importDae: callImportDae,
 	repair: callRepair,
 	backup: callBackup,
 	restore: callRestore,

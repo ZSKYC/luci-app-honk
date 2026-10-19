@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Copyright (C) 2026 kenzok8
+# Copyright (C) 2026 szwjp
 
 include $(TOPDIR)/rules.mk
 
@@ -35,12 +35,13 @@ else ifeq ($(filter arm_%,$(ARCH_PACKAGES)),$(ARCH_PACKAGES))
   HONK_HASH:=$(HONK_HASH_ARMV7)
 endif
 
-PKG_LICENSE:=AGPL-3.0-only
+# The core is GPL-3.0-only; the package ships that binary.
+PKG_LICENSE:=GPL-3.0-only
 PKG_LICENSE_FILES:=LICENSE
-PKG_MAINTAINER:=kenzok8
+PKG_MAINTAINER:=szwjp
 
 PKG_SOURCE:=$(HONK_ASSET)
-PKG_SOURCE_URL?=https://github.com/kenzok8/openwrt-honk/releases/download/staging/
+PKG_SOURCE_URL?=https://github.com/szwjp/luci-app-honk/releases/download/staging/
 PKG_HASH:=$(HONK_HASH)
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
@@ -52,7 +53,7 @@ define Package/honk
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
   TITLE:=Honk transparent proxy core
-  URL:=https://github.com/Glassyiris/honk
+  URL:=https://github.com/daeuniverse/honk
   DEPENDS:=@(x86_64||aarch64||arm) +ca-bundle +ip-full +ubus +kmod-sched-core +kmod-sched-bpf +kmod-veth +kmod-nft-queue +jsonfilter +jshn +sqlite3-cli +libubox +usign +coreutils-stat +v2ray-geoip +v2ray-geosite +@KERNEL_DEBUG_INFO_BTF
 endef
 
@@ -101,6 +102,7 @@ define Package/honk/install
 	$(INSTALL_DATA) $(CURDIR)/generated-provenance.json $(1)/usr/share/honk/provenance.json
 	$(INSTALL_BIN) $(CURDIR)/files/control.sh $(1)/usr/share/honk/control.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lock.sh $(1)/usr/share/honk/lock.sh
+	$(INSTALL_BIN) $(CURDIR)/files/firewall.sh $(1)/usr/share/honk/firewall.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lifecycle.sh $(1)/usr/share/honk/lifecycle.sh
 	$(INSTALL_BIN) $(CURDIR)/files/maintenance.sh $(1)/usr/share/honk/maintenance.sh
 	$(INSTALL_BIN) $(CURDIR)/files/job.sh $(1)/usr/share/honk/job.sh
@@ -108,6 +110,26 @@ define Package/honk/install
 	$(INSTALL_BIN) $(CURDIR)/files/redact-log.sh $(1)/usr/share/honk/redact-log.sh
 	$(INSTALL_BIN) $(CURDIR)/files/log-level-filter.sh $(1)/usr/share/honk/log-level-filter.sh
 	$(INSTALL_DATA) $(CURDIR)/files/log-lines.sh $(1)/usr/share/honk/log-lines.sh
+endef
+
+define Package/honk/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+. /usr/share/honk/firewall.sh
+port=$(uci -q get honk.main.listen_port)
+[ -n "$port" ] || port=9527
+honk_firewall_apply "$port" || exit 0
+exit 0
+endef
+
+define Package/honk/postrm
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+if [ -f /usr/share/honk/firewall.sh ]; then
+	. /usr/share/honk/firewall.sh
+	honk_firewall_remove || :
+fi
+exit 0
 endef
 
 $(eval $(call BuildPackage,honk))

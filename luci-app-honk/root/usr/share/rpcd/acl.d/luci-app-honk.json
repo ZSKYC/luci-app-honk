@@ -24,11 +24,10 @@
 		"write": {
 			"cgi-io": [ "upload" ],
 			"ubus": {
-				"honk": [ "initialize", "start", "stop", "restart", "settings", "add_subscription", "add_nodes", "import_dae", "repair", "backup", "restore", "restore_prepare", "reset", "update_apply" ]
+				"honk": [ "initialize", "start", "stop", "restart", "settings", "repair", "backup", "restore", "restore_prepare", "reset", "update_apply" ]
 			},
 			"file": {
 				"/tmp/honk-maintenance/restore.tar.gz": [ "write" ],
-				"/tmp/honk-v2-upload/import.dae": [ "write" ],
 				"/usr/share/luci-app-honk/update-geo.sh geoip": [ "exec" ],
 				"/usr/share/luci-app-honk/update-geo.sh geosite": [ "exec" ],
 				"/usr/share/luci-app-honk/geo-cron.sh enable": [ "exec" ],

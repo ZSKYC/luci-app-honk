@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Copyright (C) 2026 kenzok8
+# Copyright (C) 2026 szwjp
 
 include $(TOPDIR)/rules.mk
 
@@ -10,7 +10,7 @@ PKG_RELEASE:=1
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
 PKG_SOURCE:=doona-34657ab5-c73f88ec2d0e.tar.gz
-PKG_SOURCE_URL:=https://github.com/kenzok8/openwrt-honk/releases/download/staging
+PKG_SOURCE_URL:=https://github.com/szwjp/luci-app-honk/releases/download/staging
 PKG_SOURCE_SUBDIR:=doona
 PKG_HASH:=c73f88ec2d0eefa3d2effed6260da8f1ce174f19fdfc286f4ec1f3fcb1205a1d
 
@@ -27,8 +27,8 @@ define Package/luci-app-honk
   TITLE:=LuCI support for Honk
   DEPENDS:=+honk +rpcd +luci-base +cgi-io +jsonfilter +libubox
   PKGARCH:=all
-  URL:=https://github.com/kenzok8/openwrt-honk
-  MAINTAINER:=kenzok8
+  URL:=https://github.com/szwjp/luci-app-honk
+  MAINTAINER:=szwjp
 endef
 
 define Package/luci-app-honk/description
@@ -74,8 +74,6 @@ define Package/luci-app-honk/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/honk
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/honk/*.js $(1)/www/luci-static/resources/view/honk/
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/honk/*.css $(1)/www/luci-static/resources/view/honk/
-	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/honk/vendor
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/honk/vendor/* $(1)/www/luci-static/resources/view/honk/vendor/
 
 	$(INSTALL_DIR) $(1)/usr/share/doona
 	$(CP) $(PKG_BUILD_DIR)/root/usr/share/doona/* $(1)/usr/share/doona/

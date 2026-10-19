@@ -11,6 +11,7 @@ HONK_MAINT_CAP_FILE=$HONK_MAINT_DIR/capability
 . /lib/functions.sh
 . /usr/share/honk/lock.sh
 . /usr/share/honk/lifecycle.sh
+. /usr/share/honk/firewall.sh
 
 fail() {
 	echo "honk: $*" >&2
@@ -297,7 +298,10 @@ write_runtime_system() {
 	lan_device=$1
 	lan_ip=$2
 	system_port=${3:-$listen_port}
-	system_listen=${4:-$lan_ip}
+	# The native API binds every interface. The LAN address is not written
+	# into the system config, so a later address change cannot strand the
+	# panel on a stale address. The firewall rule keeps the port on lan.
+	system_listen=${4:-0.0.0.0}
 	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
 	[ "$current_hash" = "$system_written_hash" ] || { fail "system config changed concurrently; refusing runtime config write"; return 1; }
 	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
@@ -441,6 +445,7 @@ settings() {
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"settings_commit_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"settings_commit_and_rollback_failed_snapshot_retained"}'; fi
 		return 1
 	}
+	honk_firewall_apply "$new_port" || logger -t honk "native api firewall rule not applied for port $new_port"
 	if ! sync_boot_link "$new_boot_enabled"; then
 		settings_rollback; rollback_status=$?
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"boot_link_update_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"boot_link_update_and_rollback_failed_snapshot_retained"}'; fi
@@ -537,7 +542,7 @@ repair() {
 	if ! { [ "$old_running" = 1 ] && [ "$(configured_system_port)" = "$listen_port" ]; }; then
 		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
 	fi
-	if [ "$initialized" = 1 ]; then system_host=$lan_ip; else system_host=127.0.0.1; fi
+	if [ "$initialized" = 1 ]; then system_host=0.0.0.0; else system_host=127.0.0.1; fi
 	if [ -r /usr/share/doona/index.html ] && [ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] && system_config_readonly && \
 		grep -Fqx '    wan_interface: auto' /etc/honk/system.dae && grep -Fqx "    lan_interface: '$lan_device'" /etc/honk/system.dae && \
 		grep -Fqx "    data_dir: '/etc/honk'" /etc/honk/system.dae && grep -Fqx '    nfqueue_enable: true' /etc/honk/system.dae && \
@@ -568,7 +573,7 @@ repair() {
 			return 1
 		fi
 	fi
-	if [ "$initialized" = 1 ]; then system_listen=$lan_ip; else system_listen=127.0.0.1; fi
+	if [ "$initialized" = 1 ]; then system_listen=0.0.0.0; else system_listen=127.0.0.1; fi
 	if ! write_runtime_system "$lan_device" "$lan_ip" "$listen_port" "$system_listen"; then
 		repair_rollback_ok=1
 		[ -n "$system_written_hash" ] && ! restore_system && repair_rollback_ok=0
@@ -598,6 +603,7 @@ repair() {
 			return 1
 		fi
 	fi
+	honk_firewall_apply "$listen_port" || logger -t honk "native api firewall rule not applied for port $listen_port"
 	system_written_hash=""
 	rm -rf "$repair_dir"
 	echo '{"ok":true,"message":"system_config_repaired"}'
@@ -780,6 +786,7 @@ EOF
 		echo '{"ok":false,"message":"uci_commit_failed_restored_loopback"}'
 		return 1
 	}
+	honk_firewall_apply "$listen_port" || logger -t honk "native api firewall rule not applied for port $listen_port"
 	system_written_hash=""
 	password=""
 	username=""

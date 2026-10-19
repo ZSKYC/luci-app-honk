@@ -37,6 +37,12 @@ honk_lifecycle_parse_listen() {
 	case "$HONK_LIFECYCLE_LISTEN" in *:*) ;; *) return 1 ;; esac
 	HONK_LIFECYCLE_PORT=${HONK_LIFECYCLE_LISTEN##*:}
 	case "$HONK_LIFECYCLE_LISTEN" in ''|*[!A-Za-z0-9:._-]*) return 1 ;; esac
+	# A wildcard bind is probed on the loopback address instead of on the
+	# unspecified one, which is not a destination a probe may use.
+	case "${HONK_LIFECYCLE_LISTEN%:*}" in
+		0.0.0.0) HONK_LIFECYCLE_LISTEN="127.0.0.1:$HONK_LIFECYCLE_PORT" ;;
+		::) HONK_LIFECYCLE_LISTEN="[::1]:$HONK_LIFECYCLE_PORT" ;;
+	esac
 	case "$HONK_LIFECYCLE_PORT" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$HONK_LIFECYCLE_PORT" -ge 1024 ] && [ "$HONK_LIFECYCLE_PORT" -le 65535 ]
 }

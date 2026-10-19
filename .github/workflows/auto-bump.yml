@@ -5,7 +5,8 @@ name: Check honk/doona upstream
 
 on:
   schedule:
-    - cron: '30 0 * * *'
+    # 02:00 UTC is 10:00 in Asia/Shanghai.
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -28,7 +29,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Detect upstream changes
+      - name: Detect upstream release changes
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,16 +44,44 @@ jobs:
             fi
           }
 
-          core_new=$(git ls-remote https://github.com/Glassyiris/honk.git refs/heads/feat/native-api | cut -f1)
-          doona_new=$(git ls-remote https://github.com/Zakkaus/doona.git HEAD | cut -f1)
-          require_sha "$core_new" core
-          require_sha "$doona_new" doona
+          # The trigger is a published release, not a branch head: a release is
+          # what a reader can obtain, so the packages are built from exactly
+          # that commit. The honk repository is the one carrying the native
+          # API; the upstream main branch does not provide it.
+          latest_release_tag() {
+            local repo=$1 filter=${2:-} tag
+            for tag in $(gh api "repos/$repo/releases?per_page=100" --jq '.[].tag_name'); do
+              if [ -n "$filter" ] && ! printf '%s' "$tag" | grep -qE "$filter"; then
+                continue
+              fi
+              printf '%s\n' "$tag"
+              return 0
+            done
+            return 1
+          }
 
-          if [ "$core_new" = "$CORE_COMMIT" ] && [ "$doona_new" = "$DOONA_COMMIT" ]; then
-            echo "No upstream change."
+          doona_tag=$(latest_release_tag Zakkaus/doona) || {
+            echo "::error::no doona release found"
+            exit 1
+          }
+          core_tag=$(latest_release_tag Glassyiris/honk 'native-api') || {
+            echo "::error::no honk release with the native API found"
+            exit 1
+          }
+
+          # A release tag is immutable, so the tag alone says whether an
+          # upstream release appeared. Nothing else is touched when the tags
+          # still match, which keeps the daily run silent.
+          if [ "$doona_tag" = "$DOONA_RELEASE" ] && [ "$core_tag" = "$CORE_RELEASE" ]; then
+            echo "No upstream release change."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          doona_new=$(gh api "repos/Zakkaus/doona/commits/$doona_tag" --jq .sha)
+          core_new=$(gh api "repos/Glassyiris/honk/commits/$core_tag" --jq .sha)
+          require_sha "$core_new" core
+          require_sha "$doona_new" doona
 
           doona_version_new=$(curl -fsSL "https://raw.githubusercontent.com/Zakkaus/doona/$doona_new/package.json" | jq -r .version)
           if [ -z "$doona_version_new" ] || [ "$doona_version_new" = null ]; then
@@ -61,17 +90,19 @@ jobs:
           fi
 
           changes=""
-          if [ "$core_new" != "$CORE_COMMIT" ]; then
-            changes="core $(printf '%s' "$CORE_COMMIT" | cut -c1-7)→$(printf '%s' "$core_new" | cut -c1-7)"
+          if [ "$core_tag" != "$CORE_RELEASE" ]; then
+            changes="honk ${CORE_RELEASE}→${core_tag}"
           fi
-          if [ "$doona_new" != "$DOONA_COMMIT" ]; then
-            changes="${changes:+$changes, }doona $(printf '%s' "$DOONA_COMMIT" | cut -c1-7)→$(printf '%s' "$doona_new" | cut -c1-7)"
+          if [ "$doona_tag" != "$DOONA_RELEASE" ]; then
+            changes="${changes:+$changes, }doona ${DOONA_RELEASE}→${doona_tag}"
           fi
 
           {
             echo "changed=true"
             echo "core_new=$core_new"
+            echo "core_tag=$core_tag"
             echo "doona_new=$doona_new"
+            echo "doona_tag=$doona_tag"
             echo "doona_version_new=$doona_version_new"
             echo "changes=$changes"
           } >> "$GITHUB_OUTPUT"
@@ -93,7 +124,9 @@ jobs:
           base_sha=$(git rev-parse HEAD)
           . ci/pins.env
           core_new='${{ steps.detect.outputs.core_new }}'
+          core_tag='${{ steps.detect.outputs.core_tag }}'
           doona_new='${{ steps.detect.outputs.doona_new }}'
+          doona_tag='${{ steps.detect.outputs.doona_tag }}'
           today=$(TZ=Asia/Shanghai date +%Y.%m.%d)
 
           bump_package() {
@@ -112,7 +145,9 @@ jobs:
 
           sed -i \
             -e "s/^CORE_COMMIT=.*/CORE_COMMIT=$core_new/" \
+            -e "s/^CORE_RELEASE=.*/CORE_RELEASE=$core_tag/" \
             -e "s/^DOONA_COMMIT=.*/DOONA_COMMIT=$doona_new/" \
+            -e "s/^DOONA_RELEASE=.*/DOONA_RELEASE=$doona_tag/" \
             -e "s/^DOONA_VERSION=.*/DOONA_VERSION=${{ steps.detect.outputs.doona_version_new }}/" \
             ci/pins.env
           if [ "$core_new" != "$CORE_COMMIT" ]; then
@@ -133,8 +168,8 @@ jobs:
           fi
           bash scripts/check.sh
 
-          git config user.name kenzok8
-          git config user.email kenzok8@gmail.com
+          git config user.name szwjp
+          git config user.email szwjp@users.noreply.github.com
           git checkout -B "$STAGING"
           git add ci/pins.env honk/Makefile luci-app-honk/Makefile
           git commit -m "Update Honk upstream pins" \

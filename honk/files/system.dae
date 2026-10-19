@@ -6,6 +6,8 @@ global {
     allow_insecure: false
     auto_config_kernel_parameter: true
     data_dir: '/etc/honk'
+    # Resolves the hosts of direct downloads without passing through honk.
+    bootstrap_resolver: '127.0.0.1:53'
     store_subscribe: true
     nfqueue_enable: true
 }

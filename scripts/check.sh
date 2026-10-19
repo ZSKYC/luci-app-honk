@@ -16,9 +16,12 @@ for script in honk/files/*.sh luci-app-honk/root/usr/libexec/rpcd/honk luci-app-
 done
 sh -n honk/files/honk.init
 sh -n honk/files/90-honk-boot
-for file in luci-app-honk/htdocs/luci-static/resources/view/honk/{rpc,overview,settings,dashboard,configuration,logs,maintenance,converter,sha256}.js; do
+for file in luci-app-honk/htdocs/luci-static/resources/view/honk/{rpc,overview,settings,dashboard,logs,maintenance,sha256}.js; do
 	node --check "$file"
 done
+test ! -e luci-app-honk/htdocs/luci-static/resources/view/honk/configuration.js
+test ! -e luci-app-honk/htdocs/luci-static/resources/view/honk/converter.js
+test ! -d luci-app-honk/htdocs/luci-static/resources/view/honk/vendor
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
 
@@ -64,7 +67,7 @@ const fs = require('fs');
 const rpcSource = fs.readFileSync('luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js', 'utf8');
 const backend = fs.readFileSync('luci-app-honk/root/usr/libexec/rpcd/honk', 'utf8');
 const acl = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json', 'utf8'))['luci-app-honk'];
-const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'add_subscription', 'add_nodes', 'import_dae', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply'];
+const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply'];
 const frontend = [...rpcSource.matchAll(/method:\s*'([^']+)'/g)].map(match => match[1]);
 const list = backend.match(/echo '([^']+)'/);
 if (!list) throw new Error('RPC backend has no list method declaration');
@@ -145,11 +148,17 @@ rm -rf "$reset_fixture"
 
 grep -Fq 'include $(INCLUDE_DIR)/package.mk' luci-app-honk/Makefile
 grep -Fq '$(eval $(call BuildPackage,luci-app-honk))' luci-app-honk/Makefile
-! grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' luci-app-honk/Makefile
+! grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' luci-app-honk/Makefile || {
+	echo 'luci-app-honk must not pull the luci feed' >&2
+	exit 1
+}
 grep -Fq 'PKG_BUILD_DEPENDS:=luci-base/host' luci-app-honk/Makefile
 grep -Fq 'po2lmo ./po/zh-cn/honk.po' luci-app-honk/Makefile
 grep -Fq '$(INSTALL_DATA) $(PKG_BUILD_DIR)/honk.zh-cn.lmo' luci-app-honk/Makefile
-grep -Fq 'view/honk/vendor' luci-app-honk/Makefile
+! grep -Fq 'view/honk/vendor' luci-app-honk/Makefile || {
+	echo 'luci-app-honk must not install the removed vendor directory' >&2
+	exit 1
+}
 grep -Fq '"/tmp/honk-maintenance/restore.tar.gz": [ "write" ]' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
 
 grep -Fq 'HONK_ASSET_X86_64?=' honk/Makefile
@@ -160,7 +169,10 @@ grep -Fq '$(INSTALL_BIN) $(CURDIR)/files/update.sh' honk/Makefile
 
 grep -Fq '+@KERNEL_DEBUG_INFO_BTF' honk/Makefile
 grep -Fq "! rg -n 'MockBackend|mockBackend|mock-backend' dist" ci/build-doona.sh
-! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh
+! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh || {
+	echo 'the mock backend guard is missing from ci/build-doona.sh' >&2
+	exit 1
+}
 grep -Fq 'node tools/notices.mjs "$STAGE"' ci/build-doona.sh
 grep -Fq 'for file in LICENSE NOTICE CHANGELOG.md README.md; do' ci/build-doona.sh
 grep -Fq 'rm -rf "$STAGE/fonts" "$STAGE/.vite"' ci/build-doona.sh
@@ -173,6 +185,83 @@ grep -Fq 'checking_feed' honk/files/job.sh
 
 
 grep -Fq "honk.settings(networkSelect.value, port, bootEnabledInput.checked)" luci-app-honk/htdocs/luci-static/resources/view/honk/overview.js
+
+
+# The configuration plane lives in Doona. The LuCI side keeps the sysadmin
+# duties only, so no view, rpc method, acl entry or translation may reference
+# the removed import path any more.
+! grep -RqiE 'add_subscription|add_nodes|import_dae|importDae|addSubscription|addNodes' \
+	luci-app-honk/htdocs/luci-static/resources/view/honk \
+	luci-app-honk/root/usr/libexec/rpcd/honk \
+	luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json || {
+	echo 'a removed configuration method is still referenced' >&2
+	exit 1
+}
+! grep -q 'honk/configuration' luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json || {
+	echo 'the removed configuration view is still in the menu' >&2
+	exit 1
+}
+! grep -q 'honk-v2-upload' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json || {
+	echo 'the removed dae import upload path is still in the ACL' >&2
+	exit 1
+}
+
+# The native API binds every interface, so the firewall rule is the boundary
+# that keeps the management API on the lan zone.
+grep -Fq 'honk_native_api_lan' honk/files/firewall.sh
+grep -Fq 'honk_native_api_wan' honk/files/firewall.sh
+grep -Fq "option src='lan'" honk/files/firewall.sh || grep -Fq ".src='lan'" honk/files/firewall.sh
+grep -Fq ".src='wan'" honk/files/firewall.sh
+grep -Fq 'target' honk/files/firewall.sh
+grep -Fq 'files/firewall.sh' honk/Makefile
+grep -Fq 'Package/honk/postinst' honk/Makefile
+grep -Fq 'Package/honk/postrm' honk/Makefile
+grep -Fq 'honk_firewall_apply' honk/files/control.sh
+grep -Fq 'honk_firewall_remove' honk/files/firewall.sh
+
+# The runtime listener is a wildcard, not the LAN address: a later address
+# change must not strand the panel on a stale one.
+grep -Fq 'system_listen=${4:-0.0.0.0}' honk/files/control.sh
+grep -Fq 'system_host=0.0.0.0' honk/files/control.sh
+grep -Fq '0.0.0.0) HONK_LIFECYCLE_LISTEN="127.0.0.1:$HONK_LIFECYCLE_PORT"' honk/files/lifecycle.sh
+grep -Fq 'lan_address()' luci-app-honk/root/usr/libexec/rpcd/honk
+
+# The panel link follows the address the browser already uses for the router.
+grep -Fq 'window.location' luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
+grep -Fq "isIpLiteral" luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
+
+# The daily job reacts to upstream releases, not to branch heads, and stays
+# silent when the release tags it recorded are still the latest ones.
+grep -Fq "cron: '0 2 * * *'" .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must run at 02:00 UTC, which is 10:00 in Asia/Shanghai' >&2
+	exit 1
+}
+grep -Fq 'latest_release_tag' .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must read published releases' >&2
+	exit 1
+}
+! grep -Fq 'git ls-remote' .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must not follow a branch head' >&2
+	exit 1
+}
+grep -Fq 'CORE_RELEASE=' ci/pins.env
+grep -Fq 'DOONA_RELEASE=' ci/pins.env
+grep -Fq 'repository: openwrt/gh-action-sdk' .github/workflows/release.yml || {
+	echo 'the SDK action must come from the upstream repository' >&2
+	exit 1
+}
+! grep -Fq 'kenzok8/gh-action-sdk' .github/workflows/release.yml || {
+	echo 'the SDK action must not come from a personal fork' >&2
+	exit 1
+}
+grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
+	echo 'a release without R2 credentials must not fail the pipeline' >&2
+	exit 1
+}
+
+if command -v msgfmt >/dev/null 2>&1; then
+	msgfmt --check -o /dev/null luci-app-honk/po/zh-cn/honk.po
+fi
 
 git diff --check
 echo 'Static checks passed.'

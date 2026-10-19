@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 set -eu
 
-REPO="kenzok8/openwrt-honk"
+REPO="szwjp/luci-app-honk"
 # 用 /releases?per_page=1 而不是 /releases/latest：后者在全部为
 # pre-release 时返回 404。
 GH_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
