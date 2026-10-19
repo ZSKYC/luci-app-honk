@@ -369,36 +369,42 @@ stage_honk() { # <stage-dir> <arch>
 assert_package() { # <apk> <name> <version> <arch> <expected-depends>
 	local apk_file=$1 want_name=$2 want_version=$3 want_arch=$4 expected_deps=$5
 	local dump dep_count bad_owner
-	dump=$(apk adbdump "$apk_file" 2>/dev/null) || {
+	# Read the dump through a file, not a pipe: `grep -q` exits on the first
+	# match, so a piping printf into it dies of SIGPIPE and `set -o pipefail`
+	# reports the whole assertion as failed (the adbdump of the Doona package is
+	# well past the pipe buffer).
+	dump="$scratch/verify-$want_name.dump"
+	if ! apk adbdump "$apk_file" >"$dump" 2>/dev/null; then
 		echo "$apk_file is not a readable apk package" >&2
 		exit 1
-	}
-	printf '%s\n' "$dump" | grep -qx "  name: $want_name" || {
+	fi
+	grep -qx "  name: $want_name" "$dump" || {
 		echo "$apk_file: expected name $want_name" >&2
 		exit 1
 	}
-	printf '%s\n' "$dump" | grep -qx "  version: $want_version" || {
+	grep -qx "  version: $want_version" "$dump" || {
 		echo "$apk_file: expected version $want_version" >&2
 		exit 1
 	}
-	printf '%s\n' "$dump" | grep -qx "  arch: $want_arch" || {
+	grep -qx "  arch: $want_arch" "$dump" || {
 		echo "$apk_file: expected arch $want_arch" >&2
 		exit 1
 	}
-	dep_count=$(printf '%s\n' "$dump" | awk '
+	dep_count=$(awk '
 		/^  depends:/ { inb = 1; next }
 		inb && /^  [a-z-]+:/ { exit }
 		inb && /^    - / { count++ }
-		END { print count + 0 }')
+		END { print count + 0 }' "$dump")
 	[ "$dep_count" -eq "$expected_deps" ] || {
 		echo "$apk_file: $dep_count dependency entries, expected $expected_deps (a comma-joined depends blob becomes one bogus name)" >&2
 		exit 1
 	}
-	bad_owner=$(printf '%s\n' "$dump" | awk '/^      user: / { print $2 }' | grep -vx root || true)
+	bad_owner=$(awk '/^      user: / { print $2 }' "$dump" | grep -vx root || true)
 	[ -z "$bad_owner" ] || {
 		echo "$apk_file: packaged files owned by '$bad_owner' instead of root" >&2
 		exit 1
 	}
+	rm -f "$dump"
 }
 
 # --- packaging -------------------------------------------------------------
