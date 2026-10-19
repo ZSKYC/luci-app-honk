@@ -276,7 +276,10 @@ jobs:
             ls artifacts/apk/$arch/honk-*.apk >/dev/null 2>&1 || missing="$missing $arch"
           done
           [ -z "$missing" ] || { echo "::error::no honk package for:$missing"; exit 1; }
-          expected=$((${#OPENWRT_ARCHS} + 2))
+          # Count architectures, not characters: ${#OPENWRT_ARCHS} is the
+          # length of the string, which for six names is 99.
+          set -- $OPENWRT_ARCHS
+          expected=$(($# + 1))
           found=$(find artifacts/apk -name '*.apk' -type f | wc -l)
           [ "$found" -eq "$expected" ] || {
             echo "::error::expected $expected packages (one per arch plus the noarch LuCI package and none extra), found $found"
