@@ -61,10 +61,20 @@ jobs:
           if-no-files-found: error
 
   build-core:
-    name: Build honk-core (multi-arch)
+    name: Build honk-core (${{ matrix.core_arch }})
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    # The three musl cross-compiles are independent and each one compiles
+    # BoringSSL through zig as a C cross-compiler, so they run in parallel
+    # rather than one after another in a single job.
+    strategy:
+      fail-fast: false
+      matrix:
+        core_arch:
+          - x86_64
+          - aarch64
+          - armv7
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,12 +108,15 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ripgrep zstd
 
-      - name: Build honk-core (multi-arch)
+      - name: Build honk-core (${{ matrix.core_arch }})
+        env:
+          CORE_ARCHS: ${{ matrix.core_arch }}
         run: ci/build-core.sh
 
+      # Named so the '*-source' download pattern below still matches.
       - uses: actions/upload-artifact@v7
         with:
-          name: core-source
+          name: core-${{ matrix.core_arch }}-source
           path: |
             artifacts/cache/honk-core-*.tar.gz
             honk/generated-stage.mk
@@ -121,6 +134,35 @@ jobs:
         with:
           path: source-artifacts
           pattern: '*-source'
+      # Each matrix leg writes its own generated-stage.mk holding only that
+      # architecture's asset and hash. Merge them into the single file
+      # honk/Makefile and ci/build-apk.sh both read, and refuse to continue if a
+      # leg is missing rather than publishing an incomplete manifest.
+      - name: Merge per-architecture core manifests
+        run: |
+          set -euo pipefail
+          legs=$(ls -d source-artifacts/core-*-source)
+          test "$(printf '%s\n' "$legs" | wc -l)" -eq 3 || {
+            echo "::error::expected 3 core legs, got $(printf '%s\n' "$legs" | wc -l)"
+            exit 1
+          }
+          mkdir -p merged/honk
+          first=$(printf '%s\n' "$legs" | head -1)
+          grep '^PKG_SOURCE_URL' "$first/honk/generated-stage.mk" \
+            > merged/honk/generated-stage.mk
+          for leg in $legs; do
+            grep '^HONK_' "$leg/honk/generated-stage.mk" >> merged/honk/generated-stage.mk
+          done
+          assets=$(grep -c '^HONK_ASSET_' merged/honk/generated-stage.mk)
+          hashes=$(grep -c '^HONK_HASH_' merged/honk/generated-stage.mk)
+          test "$assets" -eq 3 && test "$hashes" -eq 3 || {
+            echo "::error::merged manifest has $assets assets and $hashes hashes, expected 3 each"
+            cat merged/honk/generated-stage.mk
+            exit 1
+          }
+          cp "$first/honk/generated-provenance.json" merged/honk/
+          cat merged/honk/generated-stage.mk
+
       - name: Publish source assets for this run
         env:
           GH_TOKEN: ${{ github.token }}
@@ -128,9 +170,9 @@ jobs:
           set -euo pipefail
           files=(source-artifacts/doona-source/artifacts/cache/*.tar.gz
                  source-artifacts/doona-source/luci-app-honk/generated-doona-stage.mk
-                 source-artifacts/core-source/artifacts/cache/*.tar.gz
-                 source-artifacts/core-source/honk/generated-stage.mk
-                 source-artifacts/core-source/honk/generated-provenance.json)
+                 source-artifacts/core-*-source/artifacts/cache/*.tar.gz
+                 merged/honk/generated-stage.mk
+                 merged/honk/generated-provenance.json)
           for file in "${files[@]}"; do test -s "$file"; done
           if ! gh release view "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release create "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \

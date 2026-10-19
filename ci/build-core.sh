@@ -25,6 +25,10 @@ test "$(zig version)" = "$ZIG_VERSION" || { echo "Expected Zig $ZIG_VERSION." >&
 # NOTE: i686 is intentionally omitted: aya-obj 0.3.0/0.4.0 ship pre-generated
 # Linux bindings for x86_64/aarch64/arm(v7)/mips*/riscv64/s390x/loongarch64
 # but not for 32-bit x86, so the generated module is empty (E0432).
+# Architectures to build. The release pipeline sets one per matrix leg so the
+# three cross-compiles run in parallel; a plain local run still does all three.
+CORE_ARCHS=${CORE_ARCHS:-"x86_64 aarch64 armv7"}
+
 declare -A TARGETS=(
 	[x86_64]="x86_64-unknown-linux-musl"
 	[aarch64]="aarch64-unknown-linux-musl"
@@ -47,8 +51,11 @@ TOOLCHAIN=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$WORK_DIR/source/rust-toolch
 test -n "$TOOLCHAIN"
 rustup toolchain install "$TOOLCHAIN" --profile minimal --component rust-src
 rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src --component llvm-tools
-for t in "${TARGETS[@]}"; do
-	rustup target add --toolchain "$TOOLCHAIN" "$t"
+# Only the architectures this invocation actually builds. The release pipeline
+# runs one architecture per matrix leg, and installing musl std for the other
+# two on every leg is pure download time.
+for a in $CORE_ARCHS; do
+	rustup target add --toolchain "$TOOLCHAIN" "${TARGETS[$a]}"
 done
 rg -q '^clash-api\s*=' "$WORK_DIR/source/crates/honk-core/Cargo.toml"
 rg -q '^ebpf\s*=' "$WORK_DIR/source/crates/honk-core/Cargo.toml"
@@ -122,7 +129,6 @@ open(p, "w").write(s)
 print("patched driver.rs for 32-bit time_t")
 PYEOF
 
-CORE_ARCHS=${CORE_ARCHS:-"x86_64 aarch64 armv7"}
 for arch in $CORE_ARCHS; do
 	target="${TARGETS[$arch]}"
 	zig_target="${ZIG_TARGETS[$arch]}"
@@ -187,4 +193,6 @@ cat > "$ROOT/honk/generated-provenance.json" <<EOF
 EOF
 
 printf 'Core archives written to %s\n' "$CACHE_DIR"
-ls -1 "$CACHE_DIR"/honk-core-"$CORE_COMMIT"-*.tar.gz
+for a in $CORE_ARCHS; do
+	ls -1 "$CACHE_DIR"/honk-core-"$CORE_COMMIT"-"$a".tar.gz
+done
