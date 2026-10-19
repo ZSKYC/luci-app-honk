@@ -127,12 +127,26 @@ LUCI_POSTINST=$(make_body "$LUCI_MAKEFILE" Package/luci-app-honk/postinst)
 LUCI_POSTRM=$(make_body "$LUCI_MAKEFILE" Package/luci-app-honk/postrm)
 HONK_CONFFILES=$(make_block "$HONK_MAKEFILE" Package/honk/conffiles)
 HONK_VERSION=$(make_value "$HONK_MAKEFILE" PKG_VERSION)
+HONK_RELEASE=$(make_value "$HONK_MAKEFILE" PKG_RELEASE)
 LUCI_VERSION=$(make_value "$LUCI_MAKEFILE" PKG_VERSION)
+LUCI_RELEASE=$(make_value "$LUCI_MAKEFILE" PKG_RELEASE)
 [ -n "$HONK_POSTINST" ] && [ -n "$HONK_CONFFILES" ] && [ -n "$HONK_VERSION" ] &&
-	[ -n "$LUCI_VERSION" ] || { echo "could not read the package Makefiles" >&2; exit 1; }
+	[ -n "$LUCI_VERSION" ] && [ -n "$HONK_RELEASE" ] && [ -n "$LUCI_RELEASE" ] || {
+	echo "could not read the package Makefiles" >&2
+	exit 1
+}
+# OpenWrt spells the package version "<PKG_VERSION>-r<PKG_RELEASE>". apk
+# compares that string as an ordered version, so dropping -r makes two builds
+# of the same day compare equal and never show up as an upgrade.
+HONK_VERSION="$HONK_VERSION-r$HONK_RELEASE"
+LUCI_VERSION="$LUCI_VERSION-r$LUCI_RELEASE"
 
 # DEPENDS minus the @-prefixed conditional entries, which OpenWrt drops on the
 # apk path anyway (include/package-pack.mk:409 does a filter-out @%).
+# The result is space-separated like OpenWrt's own
+# `$(foreach depends,...,$(depends))`: `--info depends:` takes ONE blob that
+# apk splits on spaces, so a comma-joined list becomes a single bogus
+# dependency name and every dependency then reports "no such package".
 make_depends() { # <pkg>
 	local makefile deps entry out=
 	case $1 in
@@ -151,7 +165,7 @@ make_depends() { # <pkg>
 		@*) continue ;;
 		esac
 		[ -n "$entry" ] || continue
-		out="${out:+$out,}$entry"
+		out="${out:+$out }$entry"
 	done
 	printf '%s' "$out"
 }
@@ -348,9 +362,48 @@ stage_honk() { # <stage-dir> <arch>
 	install -m 0644 "$ROOT/honk/files/log-lines.sh" "$idir/usr/share/honk/log-lines.sh"
 }
 
+# Catch the metadata defects that only surface at `apk add` time on the device:
+# a comma-joined depends blob is one bogus dependency name, files owned by the
+# CI user extract with a foreign owner, and a version without the -r release
+# never upgrades. Read the built package rather than the inputs.
+assert_package() { # <apk> <name> <version> <arch> <expected-depends>
+	local apk_file=$1 want_name=$2 want_version=$3 want_arch=$4 expected_deps=$5
+	local dump dep_count bad_owner
+	dump=$(apk adbdump "$apk_file" 2>/dev/null) || {
+		echo "$apk_file is not a readable apk package" >&2
+		exit 1
+	}
+	printf '%s\n' "$dump" | grep -qx "  name: $want_name" || {
+		echo "$apk_file: expected name $want_name" >&2
+		exit 1
+	}
+	printf '%s\n' "$dump" | grep -qx "  version: $want_version" || {
+		echo "$apk_file: expected version $want_version" >&2
+		exit 1
+	}
+	printf '%s\n' "$dump" | grep -qx "  arch: $want_arch" || {
+		echo "$apk_file: expected arch $want_arch" >&2
+		exit 1
+	}
+	dep_count=$(printf '%s\n' "$dump" | awk '
+		/^  depends:/ { inb = 1; next }
+		inb && /^  [a-z-]+:/ { exit }
+		inb && /^    - / { count++ }
+		END { print count + 0 }')
+	[ "$dep_count" -eq "$expected_deps" ] || {
+		echo "$apk_file: $dep_count dependency entries, expected $expected_deps (a comma-joined depends blob becomes one bogus name)" >&2
+		exit 1
+	}
+	bad_owner=$(printf '%s\n' "$dump" | awk '/^      user: / { print $2 }' | grep -vx root || true)
+	[ -z "$bad_owner" ] || {
+		echo "$apk_file: packaged files owned by '$bad_owner' instead of root" >&2
+		exit 1
+	}
+}
+
 # --- packaging -------------------------------------------------------------
 mkpkg() { # <stage-dir> <pkg> <arch-info> <version> <postinst> <postrm> <conffiles>
-	local idir=$1 pkg=$2 archinfo=$3 version=$4 postinst=$5 postrm=$6 sd depends
+	local idir=$1 pkg=$2 archinfo=$3 version=$4 postinst=$5 postrm=$6 sd depends dep_count
 	local out="$OUT_ROOT/$pkg-$version-$archinfo.apk"
 	sd="$scratch/scripts-$pkg-$archinfo"
 	rm -rf "$sd"
@@ -366,12 +419,16 @@ mkpkg() { # <stage-dir> <pkg> <arch-info> <version> <postinst> <postrm> <conffil
 		"$sd/post-deinstall"
 
 	depends=$(make_depends "$pkg")
+	dep_count=0
+	[ -z "$depends" ] || dep_count=$(printf '%s\n' $depends | wc -l | tr -d ' ')
+	local -a dep_args=()
+	[ -z "$depends" ] || dep_args=(--info "depends:$depends")
 	local -a args=(
 		mkpkg --compat "$APK_COMPAT"
 		--info "name:$pkg"
 		--info "version:$version"
 		--info "arch:$archinfo"
-		--info "depends:$depends"
+		"${dep_args[@]}"
 		--info "license:GPL-3.0-only"
 		--info "origin:https://github.com/szwjp/luci-app-honk"
 		--info "url:https://github.com/szwjp/luci-app-honk"
@@ -388,9 +445,26 @@ mkpkg() { # <stage-dir> <pkg> <arch-info> <version> <postinst> <postrm> <conffil
 
 	if [ "$DRY_RUN" = 1 ]; then
 		printf '[dry-run] apk %s\n' "${args[*]}"
-	else
-		SOURCE_DATE_EPOCH=0 apk "${args[@]}"
+		return 0
 	fi
+	# apk records file ownership by name. OpenWrt stages packages under fakeroot,
+	# so every file belongs to root; apk-tools-static is statically linked, which
+	# means fakeroot's LD_PRELOAD cannot intercept its stat() calls. Hand the
+	# tree to root and run mkpkg as root instead, then give the tree back so the
+	# EXIT trap can still remove it.
+	if [ "$(id -u)" = 0 ]; then
+		chown -R 0:0 "$idir" || exit 1
+		SOURCE_DATE_EPOCH=0 apk "${args[@]}" || exit 1
+	else
+		command -v sudo >/dev/null 2>&1 || {
+			echo "mkpkg must run as root (or through sudo) so packaged files are owned by root" >&2
+			exit 1
+		}
+		sudo chown -R 0:0 "$idir" || exit 1
+		sudo env SOURCE_DATE_EPOCH=0 "$(command -v apk)" "${args[@]}" || exit 1
+		sudo chown -R "$(id -u):$(id -g)" "$idir" || exit 1
+	fi
+	assert_package "$out" "$pkg" "$version" "$archinfo" "$dep_count"
 	echo "built $(basename "$out")"
 }
 

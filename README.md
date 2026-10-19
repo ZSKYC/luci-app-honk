@@ -156,9 +156,9 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 - **不能在 macOS 上构建。** Doona 源码含仅大小写不同的文件，构建脚本会主动探测并拒绝在大小写不敏感的文件系统上继续。
 - **OpenWrt SDK 已完全移除。** 改用 apk-tools 直接出包，不再下载 272 MB 的 SDK、不再构建约 1 GB 的 `immortalwrt/sdk` 镜像，矩阵从 12 个 job 变成 1 个。代价是包元数据的生成逻辑由本仓库自己维护（对照 `include/package-pack.mk` 抄写），`scripts/check.sh` 会断言 Makefile 里每个安装目标都在 `ci/build-apk.sh` 里被 stage，防止两边漂移。
 - **只支持 25.12 及以上。** 24.10 的 opkg/`.ipk` 通道已停止——apk-tools 3 产不出 ipk，保持两套打包语义不划算。
-- **尚未在真机验证。** `.apk` 的安装、`/etc/uci-defaults/90-honk` 是否真的被执行、防火墙规则是否落地，都还没有在路由器上跑过。这一段是当前最大的未知：`/lib/apk/packages/honk.list` 缺失时 `apk add` 不会报错，但 `default_postinst` 找不到 uci-defaults，表现为装上了却没生效。
+- **安装层已在真机验证（ImmortalWrt 25.12.1 / x86_64）。** `.apk` 实装通过：依赖解析、`/etc/uci-defaults/90-honk` 执行、防火墙规则落地、LuCI / rpcd / Doona 文件就位，卸载时规则与文件也清理干净。aarch64 / armv7 架构与真实代理流量仍未验证。
 - **签名更新源需要外部引导。** 内核的受签名更新通道读取 `/etc/honk/update-trust/feed.url`，该文件由仓库外的流程写入，仓库内没有写入者。
-- **实机行为未在本仓库验证。** 结构检查（`scripts/check.sh`）只覆盖语法与静态一致性，OpenWrt 上的实际行为需要在设备上验证。
+- **实机验证只覆盖安装层。** 结构检查（`scripts/check.sh`）覆盖语法与静态一致性；真机验证了安装、卸载与静态文件，代理转发、eBPF、DNS 等运行时行为仍需单独验证。
 
 ---
 

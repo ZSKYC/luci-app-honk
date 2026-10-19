@@ -345,5 +345,25 @@ grep -Fq 'must be mode 600' scripts/set-apk-key.sh
 	exit 1
 }
 
+# Real-device installs uncovered two packaging defects that no static check
+# caught: apk's depends field is ONE space-separated blob (a comma-joined list
+# becomes a single bogus dependency name), and packaged files must be owned by
+# root (OpenWrt stages under fakeroot, while apk-tools-static ignores LD_PRELOAD
+# so the tree has to be chowned instead).
+grep -Fq 'chown -R 0:0' ci/build-apk.sh || {
+	echo 'ci/build-apk.sh must stage root-owned files for mkpkg' >&2
+	exit 1
+}
+! grep -Fq 'out="${out:+$out,}$entry"' ci/build-apk.sh || {
+	echo 'apk depends must be space-separated, not comma-joined' >&2
+	exit 1
+}
+# postrm runs after the package files are gone, so it cannot source the
+# packaged firewall.sh; the firewall cleanup has to be inline.
+! awk '/^define Package\/honk\/postrm$/,/^endef$/' honk/Makefile | grep -q 'honk_firewall_remove' || {
+	echo 'Package/honk/postrm must not source the packaged firewall.sh' >&2
+	exit 1
+}
+
 git diff --check
 echo 'Static checks passed.'

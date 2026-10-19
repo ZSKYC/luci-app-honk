@@ -124,10 +124,15 @@ endef
 
 define Package/honk/postrm
 #!/bin/sh
+# postrm runs after the package files are removed, so it must not source
+# /usr/share/honk/firewall.sh. Keep the two UCI section names in sync with
+# files/firewall.sh.
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
-if [ -f /usr/share/honk/firewall.sh ]; then
-	. /usr/share/honk/firewall.sh
-	honk_firewall_remove || :
+if command -v uci >/dev/null 2>&1; then
+	uci -q delete firewall.honk_native_api_lan
+	uci -q delete firewall.honk_native_api_wan
+	uci commit firewall || :
+	/etc/init.d/firewall reload >/dev/null 2>&1 || :
 fi
 exit 0
 endef
