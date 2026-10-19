@@ -267,6 +267,14 @@ grep -Fq 'ci/install-apk-tools.sh' .github/workflows/release.yml || {
 	echo 'the build job must install apk-tools' >&2
 	exit 1
 }
+# The build job uploads one artifact named `packages`; the release and feed
+# jobs download that one by name. A `pattern:` that matches nothing still exits
+# 0 and does not even create the target directory, which is how the release job
+# silently lost its files when the SDK matrix was replaced by the apk job.
+! grep -Fq 'pattern: packages' .github/workflows/release.yml || {
+	echo 'the packages artifact must be downloaded by name, not by pattern' >&2
+	exit 1
+}
 grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
 	echo 'a release without R2 credentials must not fail the pipeline' >&2
 	exit 1

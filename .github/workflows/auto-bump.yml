@@ -238,5 +238,5 @@ jobs:
             echo "Validated commit: \`${{ steps.stage.outputs.staging_sha }}\`"
             echo "Formal release: \`$release_tag\`"
             echo ""
-            echo "Doona, Honk core and all 12 SDK package sets passed; main, Release and R2 were updated."
+            echo "Doona, Honk core and all six package architectures passed; main, Release and R2 were updated."
           } >> "$GITHUB_STEP_SUMMARY"

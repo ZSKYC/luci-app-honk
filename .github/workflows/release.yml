@@ -306,19 +306,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The build job uploads exactly one artifact, named `packages`. Download
+      # it by name rather than with a `pattern:`: a pattern that matches nothing
+      # still exits 0 and never creates `path`, which is how the SDK-era
+      # `packages-*` filter silently dropped the artifact once the matrix was
+      # replaced by the single apk job. A wrong `name:` fails this step instead.
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
+          name: packages
           path: all-artifacts
-          pattern: packages-*
 
       - name: Flatten release files
         run: |
           set -euo pipefail
+          # A single artifact is extracted straight into `path`, so the build's
+          # dist/ arrives as all-artifacts/{release,feed}.
+          test -d all-artifacts/release || {
+            echo "::error::the packages artifact has no release/ directory"
+            find all-artifacts -maxdepth 2
+            exit 1
+          }
           mkdir -p dist
-          count=$(find all-artifacts -mindepth 1 -maxdepth 1 -type d -name 'packages*' | wc -l)
-          test "$count" -eq 1 || { echo "::error::expected 1 packages artifact, got $count"; exit 1; }
-          find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
+          find all-artifacts/release -maxdepth 1 -type f -exec cp -v {} dist/ \;
           # One honk package per architecture plus the shared noarch LuCI one.
           count=$(find dist -maxdepth 1 -type f -name '*.apk' | wc -l)
           test "$count" -eq 7 || { echo "::error::expected 7 .apk files, got $count"; exit 1; }
@@ -340,6 +350,11 @@ jobs:
           CANDIDATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # pins.env derives OPENWRT_ARCHS with a shell default, so expand it
+          # here; reading the raw line would copy the ${...} expression into
+          # the manifest instead of the architecture list.
+          source ci/pins.env
+          export OPENWRT_ARCHS
           python3 - <<'PY'
           import hashlib
           import json
@@ -366,10 +381,7 @@ jobs:
               'core_archives_sha256': {key: value for key, value in source.items() if key.startswith('HONK_HASH_')},
               'honk_version': core['PKG_VERSION'] + '-r' + core['PKG_RELEASE'],
               'luci_version': doona['PKG_VERSION'] + '-r' + doona['PKG_RELEASE'],
-              'architectures': sorted(
-                  line.strip().strip('"').split('=')[1]
-                  for line in Path('ci/pins.env').read_text().splitlines()
-                  if line.startswith('OPENWRT_ARCHS=')),
+              'architectures': sorted(os.environ['OPENWRT_ARCHS'].split()),
               'packages_sha256': packages,
           }
           Path('dist/release-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
@@ -571,37 +583,36 @@ jobs:
         if: steps.r2.outputs.enabled == 'true'
         uses: actions/download-artifact@v8
         with:
+          name: packages
           path: artifacts
-          pattern: packages-*
 
       - name: Organize feed structure
         if: steps.r2.outputs.enabled == 'true'
         run: |
           set -euo pipefail
+          source ci/pins.env
           mkdir -p feed
-          for dir in artifacts/packages-sdk*; do
-            [ -d "$dir/feed" ] || continue
-            name=$(basename "$dir")
-            sdk=$(echo "$name" | sed 's/packages-sdk\([^-]*\)-.*/\1/')
-            arch=$(echo "$name" | sed 's/packages-sdk[^-]*-//')
-            # Feed layout matches the dllkids unified feed: <sdk>/<arch>/.
-            target="feed/${sdk}/${arch}"
+          # The unified feed is addressed per OpenWrt release and package
+          # architecture (<sdk>/<arch>/), so each architecture gets its own
+          # directory. The packages use the 25.12 apk container format
+          # (APK_COMPAT in ci/pins.env); luci-app-honk is PKGARCH:=all and
+          # therefore belongs in every directory. The signed index covers all
+          # architectures and is copied next to each set; apk selects the
+          # entry matching the device's architecture from it.
+          for arch in $OPENWRT_ARCHS; do
+            target="feed/25.12/$arch"
             mkdir -p "$target"
-            cp -v "$dir/feed/"* "$target/" 2>/dev/null || true
+            cp -v artifacts/feed/honk-*-"$arch".apk "$target/"
+            cp -v artifacts/feed/luci-app-honk-*.apk "$target/"
+            cp -v artifacts/feed/packages.adb "$target/"
 
             manifest=""
             for pkg in honk luci-app-honk; do
-              if ls "$target"/${pkg}-*.apk >/dev/null 2>&1; then
-                f=$(basename "$(ls "$target"/${pkg}-*.apk | sort -V | tail -1)")
-              else
-                f=""
-              fi
-              if [ -n "$f" ]; then
-                sha=$(sha256sum "$target/$f" | awk '{print $1}')
-                manifest="${manifest}${pkg}=${f}"$'\n'"${pkg}_sha256=${sha}"$'\n'
-              fi
+              f=$(basename "$(ls "$target"/${pkg}-*.apk | sort -V | tail -1)")
+              sha=$(sha256sum "$target/$f" | awk '{print $1}')
+              manifest="${manifest}${pkg}=${f}"$'\n'"${pkg}_sha256=${sha}"$'\n'
             done
-            [ -n "$manifest" ] && printf '%s' "$manifest" > "$target/manifest-honk.txt"
+            printf '%s' "$manifest" > "$target/manifest-honk.txt"
           done
           find feed -type f | sort
 
