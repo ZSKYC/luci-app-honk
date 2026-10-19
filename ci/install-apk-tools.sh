@@ -18,9 +18,19 @@ mkdir -p "$PREFIX"
 # GITHUB_PATH only exists inside Actions; the script is also runnable by hand.
 add_to_path() { [ -n "${GITHUB_PATH:-}" ] && echo "$PREFIX/bin" >> "$GITHUB_PATH"; }
 
-# `apk version` output has moved around between releases (bare number, number
-# plus build id), so match a prefix rather than an exact string.
-apk_version() { "$PREFIX/bin/apk" version 2>/dev/null | head -1 | tr -d '[:space:]' || true; }
+# `apk --help` prints "apk-tools <v>, compiled for <arch>." as its first line
+# and then the applet list, so one call covers both the version check and the
+# capability check below.
+#
+# `apk version` is NOT the version: in apk-tools 3 it is a subcommand printing
+# a table of installed/available package versions, and in an empty environment
+# it emits only a header, which reads back as an empty string.
+apk_help() { "$PREFIX/bin/apk" --help 2>&1 || true; }
+
+apk_version() {
+	apk_help | grep -m1 '^apk-tools ' |
+		sed 's/^apk-tools //; s/,.*$//' | tr -d '[:space:]' || true
+}
 
 if [ -x "$PREFIX/bin/apk" ]; then
 	installed=$(apk_version)
@@ -58,5 +68,16 @@ case "$reported" in
 	exit 1
 	;;
 esac
+
+# Assert the two subcommands this pipeline depends on actually exist rather
+# than trusting that the pinned version still has them.
+help=$(apk_help)
+for sub in mkpkg mkndx; do
+	printf '%s\n' "$help" | grep -qw "$sub" || {
+		echo "apk-tools $reported has no $sub subcommand" >&2
+		exit 1
+	}
+done
+
 echo "apk-tools $reported ready in $PREFIX/bin"
 add_to_path
