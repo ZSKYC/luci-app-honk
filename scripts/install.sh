@@ -37,6 +37,10 @@ detect_sdk() {
 }
 
 detect_manager() {
+	# 24.10 and older ship opkg and are no longer supported: apk-tools 3 cannot
+	# produce an ipk, and carrying a second packaging path for them is not worth
+	# it. Those installs are rejected explicitly rather than failing later with
+	# a confusing "no package found".
 	sdk="$(detect_sdk || true)"
 	case "$sdk" in
 		2[5-9].*|[3-9][0-9].*)
@@ -96,11 +100,12 @@ main() {
 	SDK="$(detect_sdk || true)"
 	[ -n "$SDK" ] || SDK="24.10"
 
-	if [ "$PM" = apk ]; then
-		EXT=apk
-	else
-		EXT=ipk
+	if [ "$PM" = opkg ]; then
+		echo "检测到 opkg：只支持 OpenWrt / ImmortalWrt 25.12 及更新版本（apk）。" >&2
+		echo "当前系统版本：${SDK:-未知}" >&2
+		exit 1
 	fi
+	EXT=apk
 
 	echo "检测到：架构 $ARCH · SDK $SDK · $PM"
 
@@ -113,7 +118,10 @@ main() {
 	# luci 是 noarch，但 APK 资产仍带架构后缀；优先取本机架构，其次任意一个。
 	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	if [ -z "$luci_asset" ]; then
-		# IPK 是 _all.ipk，或其它架构的 noarch APK。
+		# luci-app-honk 是 PKGARCH:=all，发布里只有一个 noarch 包。
+		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*noarch\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+	fi
+	if [ -z "$luci_asset" ]; then
 		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	fi
 

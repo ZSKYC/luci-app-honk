@@ -152,45 +152,43 @@ jobs:
           done
 
   build:
-    name: ${{ matrix.arch }} · SDK ${{ matrix.sdk }}
+    name: Build packages (apk)
     needs: publish_source
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_generic
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a9
-          - x86_64
-        sdk:
-          - "24.10"
-          - "25.12"
 
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Prepare SDK action
-        uses: actions/checkout@v7
-        with:
-          repository: openwrt/gh-action-sdk
-          ref: 44f98c51d04aebd1aa79fe4f603559c1ec2085da
-          path: .github/actions/gh-action-sdk
-          persist-credentials: false
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y openssl
+
+      - name: Require the signing key
+        env:
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APK_PRIVATE_KEY" ]; then
+            echo '::error::secret APK_PRIVATE_KEY is empty. Generate one with:'
+            echo '::error::  openssl ecparam -name prime256v1 -genkey -noout -out honk.pem'
+            echo '::error::  then: bash scripts/set-apk-key.sh'
+            exit 1
+          fi
+
+      - name: Install apk-tools
+        run: ci/install-apk-tools.sh
+
+      - name: Build po2lmo
+        run: ci/build-po2lmo.sh
 
       - name: Fetch core stage manifest
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The manifest carries per-arch SHA256 hashes; building without it
-          # silently disables hash verification (Makefile falls back to SKIP).
           gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
             --pattern 'generated-stage.mk' --dir honk --clobber
           # Provenance is installed as /usr/share/honk/provenance.json.
@@ -199,92 +197,54 @@ jobs:
           gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
             --pattern 'generated-doona-stage.mk' --dir luci-app-honk --clobber
 
+      # No SDK and no container: both packages have an empty Build/Compile, so
+      # the only per-architecture difference is which prebuilt honk-core goes
+      # into the package. ci/build-apk.sh loops the architectures itself, which
+      # is why this is one job instead of a twelve-way matrix.
       - name: Build packages
-        id: sdk
-        continue-on-error: true
-        uses: ./.github/actions/gh-action-sdk
         env:
-          CONTAINER: immortalwrt/sdk
-          ARCH: ${{ matrix.arch }}-openwrt-${{ matrix.sdk }}
-          FEEDNAME: honk
-          PACKAGES: honk luci-app-honk
-          # wall supplies v2ray-geoip / v2ray-geosite (subpackages of v2ray-geodata).
-          # An empty value leaves the SDK on its default feeds, where
-          # openwrt/packages carries the same packages. The repository variable
-          # EXTRA_FEEDS holds the feed spec; removing the variable switches to
-          # the default feeds.
-          EXTRA_FEEDS: ${{ vars.EXTRA_FEEDS }}
-          NO_REFRESH_CHECK: true
-          IGNORE_ERRORS: false
-          INDEX: 1
-          KEY_BUILD: ${{ secrets.OPKG_KEY_BUILD }}
-          PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
-
-      - name: Require all release packages
-        if: always()
-        env:
-          SDK_OUTCOME: ${{ steps.sdk.outcome }}
-        run: |
-          set -euo pipefail
-          [ "$SDK_OUTCOME" = success ] || {
-            echo "::error::SDK build concluded $SDK_OUTCOME"
-            exit 1
-          }
-          output_dir="bin/packages/${{ matrix.arch }}/honk"
-          for package in honk luci-app-honk; do
-            found=0
-            while IFS= read -r -d '' file; do
-              name=${file##*/}
-              case "$name" in
-                "$package"-*.apk|"$package"_*.apk|"$package"-*.ipk|"$package"_*.ipk)
-                  found=1
-                  break
-                  ;;
-              esac
-            done < <(find "$output_dir" -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) -print0 2>/dev/null || true)
-            [ "$found" -eq 1 ] || {
-              echo "::error::$package has no package for ${{ matrix.arch }} SDK ${{ matrix.sdk }}"
-              exit 1
-            }
-          done
+          APK_PRIVATE_KEY: ${{ secrets.APK_PRIVATE_KEY }}
+        run: ci/build-apk.sh
 
       - name: Collect packages
         run: |
-          ARCH="${{ matrix.arch }}"
+          set -euo pipefail
+          source ci/pins.env
           mkdir -p dist/release dist/feed
-          FEED_DIR="bin/packages/${ARCH}/honk"
-
-          for f in "$FEED_DIR"/*.ipk; do
-            [ -f "$f" ] || continue
-            case "$(basename "$f")" in Packages*) continue ;; esac
-            base=$(basename "$f" .ipk)
-            safe="${base//\~/.}"
-            cp -v "$f" "dist/release/${safe}.ipk"
-            cp -v "$f" dist/feed/
-          done
-
-          for f in "$FEED_DIR"/*.apk; do
-            [ -f "$f" ] || continue
-            case "$(basename "$f")" in Packages*|APKINDEX*|packages.adb*) continue ;; esac
-            base=$(basename "$f" .apk)
-            safe="${base//\~/.}"
-            if echo "$safe" | grep -q "_${ARCH}\$"; then
-              cp -v "$f" "dist/release/${safe}.apk"
-            else
-              cp -v "$f" "dist/release/${safe}-${ARCH}.apk"
+          cp -v artifacts/apk/luci-app-honk-*.apk dist/release/
+          cp -v artifacts/apk/luci-app-honk-*.apk dist/feed/
+          cp -v artifacts/apk/luci-app-honk.pub.pem dist/release/
+          for arch in $OPENWRT_ARCHS; do
+            if [ ! -d "artifacts/apk/$arch" ]; then
+              echo "::error::no package produced for $arch"
+              exit 1
             fi
-            cp -v "$f" dist/feed/
+            cp -v "artifacts/apk/$arch/honk-"*.apk dist/release/
+            cp -v "artifacts/apk/$arch/honk-"*.apk dist/feed/
           done
+          [ -s artifacts/apk/packages.adb ] || { echo '::error::packages.adb missing'; exit 1; }
+          cp -v artifacts/apk/packages.adb dist/feed/
 
-          for f in "$FEED_DIR"/Packages* "$FEED_DIR"/APKINDEX* "$FEED_DIR"/packages.adb*; do
-            [ -f "$f" ] || continue
-            cp -v "$f" dist/feed/
+      - name: Require every architecture and the feed index
+        run: |
+          set -euo pipefail
+          source ci/pins.env
+          missing=''
+          for arch in $OPENWRT_ARCHS; do
+            ls artifacts/apk/$arch/honk-*.apk >/dev/null 2>&1 || missing="$missing $arch"
           done
+          [ -z "$missing" ] || { echo "::error::no honk package for:$missing"; exit 1; }
+          expected=$((${#OPENWRT_ARCHS} + 2))
+          found=$(find artifacts/apk -name '*.apk' -type f | wc -l)
+          [ "$found" -eq "$expected" ] || {
+            echo "::error::expected $expected packages (one per arch plus the noarch LuCI package and none extra), found $found"
+            find artifacts/apk -name '*.apk' -type f
+            exit 1
+          }
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
-          name: packages-sdk${{ matrix.sdk }}-${{ matrix.arch }}
+          name: packages
           path: dist/
           if-no-files-found: error
 
@@ -311,12 +271,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          count=$(find all-artifacts -mindepth 1 -maxdepth 1 -type d -name 'packages-sdk*' | wc -l)
-          test "$count" -eq 12 || { echo "::error::expected 12 SDK artifacts, got $count"; exit 1; }
+          count=$(find all-artifacts -mindepth 1 -maxdepth 1 -type d -name 'packages*' | wc -l)
+          test "$count" -eq 1 || { echo "::error::expected 1 packages artifact, got $count"; exit 1; }
           find all-artifacts -path "*/release/*" -type f -exec cp -v {} dist/ \;
-          # LuCI's SDK 24.10 _all.ipk is shared by all six architectures.
-          test "$(find dist -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipk' \) | wc -l)" -ge 19
-          (cd dist && sha256sum ./*.apk ./*.ipk > SHA256SUMS)
+          # One honk package per architecture plus the shared noarch LuCI one.
+          count=$(find dist -maxdepth 1 -type f -name '*.apk' | wc -l)
+          test "$count" -eq 7 || { echo "::error::expected 7 .apk files, got $count"; exit 1; }
+          (cd dist && sha256sum ./*.apk > SHA256SUMS)
 
       - name: Read source asset hashes
         env:
@@ -348,7 +309,7 @@ jobs:
           doona = assignments('luci-app-honk/Makefile', ':=')
           source = assignments('source-meta/generated-stage.mk', ':=')
           packages = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                      for path in sorted(Path('dist').iterdir()) if path.suffix in ('.apk', '.ipk')}
+                      for path in sorted(Path('dist').iterdir()) if path.suffix == '.apk'}
           manifest = {
               'candidate_sha': os.environ['CANDIDATE_SHA'],
               'base_sha': os.environ['BASE_SHA'],
@@ -360,7 +321,10 @@ jobs:
               'core_archives_sha256': {key: value for key, value in source.items() if key.startswith('HONK_HASH_')},
               'honk_version': core['PKG_VERSION'] + '-r' + core['PKG_RELEASE'],
               'luci_version': doona['PKG_VERSION'] + '-r' + doona['PKG_RELEASE'],
-              'sdk_sets': sorted(path.name for path in Path('all-artifacts').iterdir() if path.is_dir()),
+              'architectures': sorted(
+                  line.strip().strip('"').split('=')[1]
+                  for line in Path('ci/pins.env').read_text().splitlines()
+                  if line.startswith('OPENWRT_ARCHS=')),
               'packages_sha256': packages,
           }
           Path('dist/release-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
@@ -447,38 +411,23 @@ jobs:
 
             echo "## Packages / 安装包"
             echo ""
-            cell_ipk() {
-              pkg="$1"; arch="$2"; fallback="$3"
-              f=$(ls dist/${pkg}_*_${arch}.ipk 2>/dev/null | head -1)
-              [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "$fallback"
-            }
             cell_apk() {
               pkg="$1"; arch="$2"
               f=$(ls dist/${pkg}-*-${arch}.apk 2>/dev/null | head -1)
               [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—"
             }
-            noarch_ipk() {
-              pkg="$1"
-              f=$(ls dist/${pkg}_*_all.ipk 2>/dev/null | head -1)
-              [ -n "$f" ] && echo "[$(basename $f)](${BASE}/$(basename $f))" || echo "—"
-            }
 
-            echo "## 📦 SDK 24.10 · 稳定版 (IPK)"
+            echo "## 📦 25.12+ · 稳定版 (APK)"
+            echo ""
+            echo "只支持 25.12 及以上（apk）。24.10 的 opkg/ipk 通道已停止。"
             echo ""
             echo "| 架构 | honk | luci-app-honk |"
             echo "| :--- | :--- | :--- |"
-            luci_fallback=$(noarch_ipk luci-app-honk)
+            luci_link=$(ls dist/luci-app-honk-*.apk 2>/dev/null | head -1)
+            luci_cell="—"
+            [ -n "$luci_link" ] && luci_cell="[$(basename $luci_link)](${BASE}/$(basename $luci_link))"
             for arch in $ARCHS; do
-              echo "| \`${arch}\` | $(cell_ipk honk $arch —) | $(cell_ipk luci-app-honk $arch "$luci_fallback") |"
-            done
-
-            echo ""
-            echo "## 📦 SDK 25.12 · 稳定版 (APK)"
-            echo ""
-            echo "| 架构 | honk | luci-app-honk |"
-            echo "| :--- | :--- | :--- |"
-            for arch in $ARCHS; do
-              echo "| \`${arch}\` | $(cell_apk honk $arch) | $(cell_apk luci-app-honk $arch) |"
+              echo "| \`${arch}\` | $(cell_apk honk $arch) | $luci_cell |"
             done
           } > release_notes.md
 
@@ -597,9 +546,7 @@ jobs:
 
             manifest=""
             for pkg in honk luci-app-honk; do
-              if ls "$target"/${pkg}_*.ipk >/dev/null 2>&1; then
-                f=$(basename "$(ls "$target"/${pkg}_*.ipk | sort -V | tail -1)")
-              elif ls "$target"/${pkg}-*.apk >/dev/null 2>&1; then
+              if ls "$target"/${pkg}-*.apk >/dev/null 2>&1; then
                 f=$(basename "$(ls "$target"/${pkg}-*.apk | sort -V | tail -1)")
               else
                 f=""

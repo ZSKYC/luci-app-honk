@@ -28,7 +28,6 @@ node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-a
 grep -q '^CORE_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_PATCH_SHA256=[0-9a-f]\{64\}$' ci/pins.env
-grep -q '^OPENWRT_SDK_SHA256=[0-9a-f]\{64\}$' ci/pins.env
 test "$(sha256sum ci/patches/doona-openwrt.patch | cut -d' ' -f1)" = "$(sed -n 's/^DOONA_PATCH_SHA256=//p' ci/pins.env)"
 source ci/pins.env
 test "$CORE_COMMIT" = "$(sed -n 's/^CORE_COMMIT:=//p' honk/Makefile)"
@@ -246,12 +245,26 @@ grep -Fq 'latest_release_tag' .github/workflows/auto-bump.yml || {
 }
 grep -Fq 'CORE_RELEASE=' ci/pins.env
 grep -Fq 'DOONA_RELEASE=' ci/pins.env
-grep -Fq 'repository: openwrt/gh-action-sdk' .github/workflows/release.yml || {
-	echo 'the SDK action must come from the upstream repository' >&2
+# The SDK and its ~1 GB container are gone: the packages are built by
+# ci/build-apk.sh with apk-tools directly. Both of these are load-bearing, so a
+# reintroduction should be a deliberate decision rather than a stray line.
+for banned in gh-action-sdk 'immortalwrt/sdk' 'OPENWRT_SDK_URL'; do
+	! grep -RqF "$banned" .github/workflows/ || {
+		echo "the release pipeline must not reference $banned" >&2
+		exit 1
+	}
+done
+# 24.10 and opkg are gone; nothing may produce or collect a .ipk again.
+! grep -RqF '.ipk' .github/workflows/ || {
+	echo 'the release pipeline no longer ships .ipk (24.10/opkg support is dropped)' >&2
 	exit 1
 }
-! grep -Fq 'kenzok8/gh-action-sdk' .github/workflows/release.yml || {
-	echo 'the SDK action must not come from a personal fork' >&2
+grep -Fq 'ci/build-apk.sh' .github/workflows/release.yml || {
+	echo 'the build job must call ci/build-apk.sh' >&2
+	exit 1
+}
+grep -Fq 'ci/install-apk-tools.sh' .github/workflows/release.yml || {
+	echo 'the build job must install apk-tools' >&2
 	exit 1
 }
 grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
@@ -273,6 +286,47 @@ grep -Fq 'must be mode 600' scripts/set-r2-secrets.sh
 if command -v msgfmt >/dev/null 2>&1; then
 	msgfmt --check -o /dev/null luci-app-honk/po/zh-cn/honk.po
 fi
+
+# --- apk-native packer -----------------------------------------------------
+# ci/build-apk.sh stages the same files the package Makefiles describe. The
+# Makefiles stay in place for anyone building with an SDK, so a file added to
+# one and forgotten in the other has to fail here rather than in a release.
+for script in ci/install-apk-tools.sh ci/build-po2lmo.sh ci/build-apk.sh scripts/set-apk-key.sh; do
+	test -f "$script" || { echo "missing $script" >&2; exit 1; }
+	bash -n "$script"
+done
+for var in APK_TOOLS_SHA256 APK_COMPAT LUCI_COMMIT; do
+	grep -q "^${var}=." ci/pins.env || { echo "ci/pins.env is missing $var" >&2; exit 1; }
+done
+test "$(sed -n 's/^APK_TOOLS_SHA256=//p' ci/pins.env | tr -d '\n' | wc -c)" -eq 64
+
+# Every install target named in a Makefile must be staged by the packer.
+targets_file=$(mktemp)
+trap 'rm -f "$targets_file"' EXIT
+for makefile in honk/Makefile luci-app-honk/Makefile; do
+	awk '/^define Package\/.*\/install$/ { inb = 1; next }
+	     inb && /^endef$/ { exit }
+	     inb { print }' "$makefile" |
+		grep -oE '\$\(1\)/[^[:space:]"]+' |
+		sed 's|^\$(1)/||; s|/*$||' | LC_ALL=C sort -u > "$targets_file"
+	test -s "$targets_file" || { echo "no install targets found in $makefile" >&2; exit 1; }
+	while IFS= read -r target; do
+		[ -n "$target" ] || continue
+		grep -Fq "$target" ci/build-apk.sh || {
+			echo "$makefile installs $target but ci/build-apk.sh never stages it" >&2
+			exit 1
+		}
+	done < "$targets_file"
+done
+
+# The signing key must never be committed, and the helper must not read one
+# from the working tree.
+grep -Fq 'gh secret set APK_PRIVATE_KEY' scripts/set-apk-key.sh
+grep -Fq 'must be mode 600' scripts/set-apk-key.sh
+! grep -RIlE 'BEGIN (EC )?PRIVATE KEY' . --exclude-dir=.git --exclude-dir=.cache --exclude-dir=artifacts 2>/dev/null | grep -q . || {
+	echo 'a private key is present in the working tree' >&2
+	exit 1
+}
 
 git diff --check
 echo 'Static checks passed.'

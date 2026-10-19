@@ -80,7 +80,7 @@ config rule 'honk_native_api_wan'    src=wan  dest_port=9527  target=REJECT
 
 ## 固定源码与构建
 
-核心和 Doona 的完整提交、Doona 的 OpenWrt 补丁摘要，以及 OpenWrt SDK 的地址和 SHA256 全部固定在 `ci/pins.env`。
+核心和 Doona 的完整提交、Doona 的 OpenWrt 补丁摘要、apk-tools 与 `po2lmo` 的地址和 SHA256 全部固定在 `ci/pins.env`。
 
 > **上游状态**：`honk` 的原生 API 目前只存在于 [`Glassyiris/honk`](https://github.com/Glassyiris/honk) 的 `feat/native-api` 分支，`daeuniverse/honk` 的 `main` 不提供该 API。Doona 官方文档同样写明"上游 daeuniverse/honk main 不提供该 API"。本仓库的 `ci/pins.env` 因此锁定的是前者。
 
@@ -101,7 +101,7 @@ Doona 从源码构建，保留 OpenWrt 同源适配补丁；归档不含可选�
 
 1. 解析出该 release 对应的提交，把 `ci/pins.env` 的 `CORE_COMMIT` / `DOONA_COMMIT` 与 `CORE_RELEASE` / `DOONA_RELEASE` 更新到该提交；
 2. 在独立分支上写入 pin、包版本与 Doona 归档哈希；
-3. 启动 `release.yml` 构建核心、Doona 和全部 12 组 SDK 安装包。任一组失败就停止晋级；
+3. 启动 `release.yml` 构建核心、Doona 和全部 6 个架构的安装包（单 job，无矩阵）。任一步失败就停止晋级；
 4. 全部通过后，才把验证过的提交和正式 tag 原子推送到 `main`，发布正式 Release，并更新软件源。
 
 包的构建来源始终是**上游 release 指向的那个提交**，而不是分支头：读者拿到的是发布版，构建的就应该也是发布版。
@@ -112,7 +112,7 @@ Doona 从源码构建，保留 OpenWrt 同源适配补丁；归档不含可选�
 gh workflow run auto-bump.yml
 ```
 
-完整构建需要在大小写敏感的 Linux 文件系统上运行（Doona 上游同时有仅大小写不同的文件）。需要 Rust/rustup、Zig 0.14.1、Node.js 22.13 或更新版本与 Corepack、Git、curl、ripgrep、GNU tar、zstd、`readelf`，以及 `build-essential`、clang、LLVM、libbpf、libelf、pkg-config、CMake、libclang 和 OpenWrt SDK 所需工具。核心交叉编译脚本会核对 Rust/Doona/SDK 输入和 Zig、bpf-linker 版本；SDK 阶段限定 Linux x86_64。
+完整构建需要在大小写敏感的 Linux 文件系统上运行（Doona 上游同时有仅大小写不同的文件）。需要 Rust/rustup、Zig 0.14.1、Node.js 22.13 或更新版本与 Corepack、Git、curl、ripgrep、GNU tar、zstd、`readelf`、openssl 与 C 编译器，以及 `build-essential`、clang、LLVM、libbpf、libelf、pkg-config、CMake、libclang。核心交叉编译脚本会核对 Rust/Doona 输入和 Zig、bpf-linker 版本；打包阶段限定 Linux x86_64。
 
 在满足工具要求的 Linux 环境中按顺序运行：
 
@@ -122,7 +122,13 @@ ci/build-doona.sh
 ci/build-core.sh
 ```
 
-脚本将源码归档写入被 Git 忽略的 `artifacts/cache/`。12 组 SDK 安装包由 `release.yml` 构建；它从本次运行独立的源码资产 tag 下载带 SHA256 的阶段文件，任一散列不匹配或安装包缺失都会使构建失败。
+脚本将源码归档写入被 Git 忽略的 `artifacts/cache/`。
+
+安装包由 `release.yml` 用 **apk-tools 直接构建，不经过 OpenWrt SDK**：两个包的 `Build/Compile` 都是空的，核心二进制由 `ci/build-core.sh` 单独交叉编译，LuCI 侧只有文件拷贝和一次 `po2lmo`。SDK 在这里除了打包、签名、生成 `/lib/apk/packages/*` 元数据和建索引之外没有别的用途，而 `apk mkpkg` / `apk mkndx` 本身就能做这四件事。
+
+因此各架构的差别只是"往包里放哪个预编译二进制"，矩阵从 12 个 job 塌成 1 个 job 内部循环 6 个架构。apk-tools 取 Alpine 的 `apk-tools-static`（约 2 MB，校验 SHA256），`po2lmo` 从 pin 住的 luci 提交现场编译（lemon 生成 `plural_formula.c`）。
+
+安装阶段需要仓库 secret `APK_PRIVATE_KEY`，否则构建直接失败并给出生成命令。
 
 ---
 
@@ -148,8 +154,9 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 ## 已知限制
 
 - **不能在 macOS 上构建。** Doona 源码含仅大小写不同的文件，构建脚本会主动探测并拒绝在大小写不敏感的文件系统上继续。
-- **Geo 数据 feed 仍指向第三方。** 仓库变量 `EXTRA_FEEDS` 指向 `kenzok8/wall`，由它提供 `v2ray-geoip` / `v2ray-geosite`。官方 `openwrt/packages` 的 `net/v2ray-geodata` 产出同名包，且在 25.12.4 的全部 6 个目标架构上都有二进制；**删掉这个变量**即可改用 SDK 默认的官方源，但需要一次 CI 构建验证。
-- **打包 action 已改用官方仓库。** `openwrt/gh-action-sdk` 与原来的 fork 在被 pin 的提交上完全一致，因此换成官方源没有任何行为变化，同时去掉了对个人仓库的依赖。
+- **OpenWrt SDK 已完全移除。** 改用 apk-tools 直接出包，不再下载 272 MB 的 SDK、不再构建约 1 GB 的 `immortalwrt/sdk` 镜像，矩阵从 12 个 job 变成 1 个。代价是包元数据的生成逻辑由本仓库自己维护（对照 `include/package-pack.mk` 抄写），`scripts/check.sh` 会断言 Makefile 里每个安装目标都在 `ci/build-apk.sh` 里被 stage，防止两边漂移。
+- **只支持 25.12 及以上。** 24.10 的 opkg/`.ipk` 通道已停止——apk-tools 3 产不出 ipk，保持两套打包语义不划算。
+- **尚未在真机验证。** `.apk` 的安装、`/etc/uci-defaults/90-honk` 是否真的被执行、防火墙规则是否落地，都还没有在路由器上跑过。这一段是当前最大的未知：`/lib/apk/packages/honk.list` 缺失时 `apk add` 不会报错，但 `default_postinst` 找不到 uci-defaults，表现为装上了却没生效。
 - **签名更新源需要外部引导。** 内核的受签名更新通道读取 `/etc/honk/update-trust/feed.url`，该文件由仓库外的流程写入，仓库内没有写入者。
 - **实机行为未在本仓库验证。** 结构检查（`scripts/check.sh`）只覆盖语法与静态一致性，OpenWrt 上的实际行为需要在设备上验证。
 
@@ -157,13 +164,25 @@ OpenWrt 24.10 及更早版本使用 Linux 6.6，低于 honk 要求的 6.12。**�
 
 ## 仓库设置
 
-发布流水线只需要一组仓库变量，没有必配 secret。
+发布流水线需要**一个必配 secret** 加一组可选变量。
+
+**Secrets**：
+
+| 名称 | 用途 |
+|---|---|
+| `APK_PRIVATE_KEY` | 打包签名私钥（EC prime256v1 PEM）。缺失时 `build` job 直接失败并打印生成命令。对应的公钥随每次 Release 发布，供设备信任。 |
+
+```sh
+mkdir -p ~/.config/honk
+openssl ecparam -name prime256v1 -genkey -noout -out ~/.config/honk/apk-key.pem
+chmod 600 ~/.config/honk/apk-key.pem
+bash scripts/set-apk-key.sh
+```
 
 **Variables**（非敏感，仓库设置页可改）：
 
 | 名称 | 默认 | 用途 |
 |---|---|---|
-| `EXTRA_FEEDS` | `src-git\|wall\|https://github.com/kenzok8/wall` | Geo 数据 feed；删掉即改用 SDK 默认的官方源 |
 | `AGGREGATE_FEED_REPOSITORY` | 空 | 聚合 feed 的目标仓库；为空则不触发聚合 |
 
 ### 软件源即 GitHub Releases
