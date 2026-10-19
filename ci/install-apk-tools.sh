@@ -33,12 +33,19 @@ if [ -x "$PREFIX/bin/apk" ]; then
 	esac
 fi
 
-work="$PREFIX/.download"
-rm -rf "$work"
-mkdir -p "$work"
+# The download directory deliberately lives outside $PREFIX: a stale install is
+# cleared by removing $PREFIX, and anything unpacked underneath it would go with
+# it before the binary could be copied out.
+work=$(mktemp -d "${TMPDIR:-/tmp}/honk-apk-tools.XXXXXX")
+trap 'rm -rf "$work"' EXIT
 curl -fsSL -o "$work/apk-tools.apk" "$APK_TOOLS_URL"
 echo "${APK_TOOLS_SHA256}  $work/apk-tools.apk" | sha256sum -c -
 tar -xzf "$work/apk-tools.apk" -C "$work"
+test -f "$work/sbin/apk.static" || {
+	echo "$APK_TOOLS_URL does not contain sbin/apk.static" >&2
+	exit 1
+}
+
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX/bin"
 install -m 0755 "$work/sbin/apk.static" "$PREFIX/bin/apk"
