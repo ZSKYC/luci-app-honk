@@ -11,6 +11,7 @@ done
 for script in ci/build-doona.sh scripts/check.sh; do
 	bash -n "$script"
 done
+sh -n scripts/install.sh
 for script in honk/files/*.sh luci-app-honk/root/usr/libexec/rpcd/honk luci-app-honk/root/usr/share/luci-app-honk/*.sh; do
 	sh -n "$script"
 done
@@ -277,6 +278,14 @@ grep -Fq 'ci/install-apk-tools.sh' .github/workflows/release.yml || {
 }
 grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
 	echo 'a release without R2 credentials must not fail the pipeline' >&2
+	exit 1
+}
+
+# Release asset URLs carry the repository name (.../szwjp/luci-app-honk/...),
+# so install.sh must match file names. Filtering the URLs with
+# `grep -v "luci-app-honk"` drops every honk asset and breaks the installer.
+! grep -Fq '| grep -v "luci-app-honk"' scripts/install.sh || {
+	echo 'scripts/install.sh must match asset file names, not exclude the repo path' >&2
 	exit 1
 }
 

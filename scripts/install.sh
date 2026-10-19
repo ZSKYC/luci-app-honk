@@ -113,23 +113,25 @@ main() {
 	[ -n "$release_json" ] || { echo "无法获取最新 Release 信息。" >&2; exit 1; }
 
 	# 从 release assets 里挑出本机架构的 honk 与 luci-app-honk。
-	# 注意：honk 模式必须排除 luci-app-honk，否则 head -n 1 可能抓错包。
-	honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*honk[^\"]*${ARCH}\.${EXT}\"" | grep -v "luci-app-honk" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	# luci 是 noarch，但 APK 资产仍带架构后缀；优先取本机架构，其次任意一个。
-	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+	# 资产 URL 里带仓库路径（.../szwjp/luci-app-honk/releases/download/...），
+	# 所以匹配必须锚定到文件名（最后一个 `/` 之后）：对整条 URL 做
+	# grep -v "luci-app-honk" 会连所有 honk 资产一起排除掉。
+	honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/honk-[^\"/]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+	# luci 是 noarch，但 APK 资产仍带架构后缀；优先取本机架构，其次 noarch，最后任意一个。
+	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	if [ -z "$luci_asset" ]; then
 		# luci-app-honk 是 PKGARCH:=all，发布里只有一个 noarch 包。
-		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*noarch\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*noarch\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	fi
 	if [ -z "$luci_asset" ]; then
-		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*luci-app-honk[^\"]*\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 	fi
 
 	if [ -z "$honk_asset" ] && [ "$PM" = apk ]; then
 		alt="$(fallback_arch "$ARCH" || true)"
 		if [ -n "$alt" ]; then
 			echo "架构 $ARCH 无独立包，回退到 $alt。"
-			honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*honk[^\"]*${alt}\.apk\"" | grep -v "luci-app-honk" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
+			honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/honk-[^\"/]*${alt}\.apk\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
 		fi
 	fi
 
