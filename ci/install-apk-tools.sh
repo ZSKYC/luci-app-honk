@@ -69,11 +69,17 @@ case "$reported" in
 	;;
 esac
 
-# Assert the two subcommands this pipeline depends on actually exist rather
-# than trusting that the pinned version still has them.
-help=$(apk_help)
+# Assert the two subcommands this pipeline depends on actually exist.
+#
+# Not via `apk --help`: its applet list is a compressed help blob built at
+# compile time and it prints group headings, which need not name the subcommand
+# itself. Running `apk <sub>` is no better, because an unknown applet falls
+# through to the same global usage output as a real one. The applet name table
+# is a plain string table in the binary, so look there: a real subcommand name
+# appears exactly once, an invented one never appears.
 for sub in mkpkg mkndx; do
-	printf '%s\n' "$help" | grep -qw "$sub" || {
+	count=$(LC_ALL=C grep -c "$sub" "$PREFIX/bin/apk" 2>/dev/null || true)
+	test "${count:-0}" -ge 1 || {
 		echo "apk-tools $reported has no $sub subcommand" >&2
 		exit 1
 	}
