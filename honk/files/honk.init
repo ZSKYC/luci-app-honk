@@ -38,10 +38,14 @@ start_service() {
 
 	procd_open_instance main
 	procd_set_param command /usr/bin/honk-core --config "$HONK_CONFIG" --disable-timestamp
-	procd_set_param env DAE_LOCATION_ASSET="/usr/share/v2ray"
+	# procd_set_param env REPLACES the whole environment list, so every variable
+	# has to be set in one call. Two calls left only the last one in procd.json,
+	# which dropped DAE_LOCATION_ASSET: the core could not find
+	# /usr/share/v2ray/geoip.dat and geosite.dat, so all geo matchers were
+	# unavailable and the mainland routing rules silently did nothing.
 	# The mimalloc build holds freed memory until the purge delay elapses, which
 	# keeps the geodata update from giving the memory back to the system.
-	procd_set_param env MIMALLOC_PURGE_DELAY=0
+	procd_set_param env DAE_LOCATION_ASSET=/usr/share/v2ray MIMALLOC_PURGE_DELAY=0
 	procd_set_param limits nofile="1048576 1048576"
 	procd_set_param stdout 1
 	procd_set_param stderr 1

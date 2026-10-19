@@ -226,6 +226,15 @@ grep -Fq 'system_host=0.0.0.0' honk/files/control.sh
 grep -Fq '0.0.0.0) HONK_LIFECYCLE_LISTEN="127.0.0.1:$HONK_LIFECYCLE_PORT"' honk/files/lifecycle.sh
 grep -Fq 'lan_address()' luci-app-honk/root/usr/libexec/rpcd/honk
 
+# procd_set_param env REPLACES the whole environment list, so a second call in
+# the same instance silently drops the first variable. That once dropped
+# DAE_LOCATION_ASSET, and the core could not find geoip.dat/geosite.dat.
+test "$(grep -c '^[[:space:]]*procd_set_param env' honk/files/honk.init)" -eq 1 || {
+	echo 'honk/files/honk.init must set every procd env variable in one call' >&2
+	exit 1
+}
+grep -Fq 'DAE_LOCATION_ASSET=/usr/share/v2ray' honk/files/honk.init
+
 # The panel link follows the address the browser already uses for the router.
 grep -Fq 'window.location' luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
 grep -Fq "isIpLiteral" luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
