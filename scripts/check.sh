@@ -245,8 +245,8 @@ grep -Fq "isIpLiteral" luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.
 
 # The daily job reacts to upstream releases, not to branch heads, and stays
 # silent when the release tags it recorded are still the latest ones.
-grep -Fq "cron: '0 22 * * *'" .github/workflows/auto-bump.yml || {
-	echo 'the upstream check must run at 22:00 UTC, which is 06:00 in Asia/Shanghai' >&2
+grep -Fq "cron: '0 0 * * *'" .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must run at 00:00 UTC, which is 08:00 in Asia/Shanghai' >&2
 	exit 1
 }
 grep -Fq 'latest_release_tag' .github/workflows/auto-bump.yml || {

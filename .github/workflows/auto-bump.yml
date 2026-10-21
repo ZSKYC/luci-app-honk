@@ -5,10 +5,11 @@ name: Check honk/doona upstream
 
 on:
   schedule:
-    # 22:00 UTC is 06:00 in Asia/Shanghai. Upstream's daily commit activity
+    # 00:00 UTC is 08:00 in Asia/Shanghai. Upstream's daily commit activity
     # sits between roughly 12:00Z and 22:00Z, so this slot collects the whole
-    # day's changes in one run instead of testing a mid-flight state.
-    - cron: '0 22 * * *'
+    # day's changes in one run instead of testing a mid-flight state, and it
+    # also leaves two hours of margin before the next day's activity starts.
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
