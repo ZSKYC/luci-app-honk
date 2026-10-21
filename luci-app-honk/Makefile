@@ -5,14 +5,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-honk
-PKG_VERSION:=2026.10.18
+PKG_VERSION:=2026.10.21
 PKG_RELEASE:=1
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
-PKG_SOURCE:=doona-34657ab5-c73f88ec2d0e.tar.gz
+PKG_SOURCE:=doona-6acdabdc-6fb5fec490b6.tar.gz
 PKG_SOURCE_URL:=https://github.com/szwjp/luci-app-honk/releases/download/staging
 PKG_SOURCE_SUBDIR:=doona
-PKG_HASH:=c73f88ec2d0eefa3d2effed6260da8f1ce174f19fdfc286f4ec1f3fcb1205a1d
+PKG_HASH:=6fb5fec490b6e86604d8ae4b07d872896639d9e1d744adb6fb2394cbe3ef34b3
 
 -include $(CURDIR)/generated-doona-stage.mk
 
