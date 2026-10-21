@@ -32,6 +32,10 @@ grep -q '^DOONA_PATCH_SHA256=[0-9a-f]\{64\}$' ci/pins.env
 test "$(sha256sum ci/patches/doona-openwrt.patch | cut -d' ' -f1)" = "$(sed -n 's/^DOONA_PATCH_SHA256=//p' ci/pins.env)"
 source ci/pins.env
 test "$CORE_COMMIT" = "$(sed -n 's/^CORE_COMMIT:=//p' honk/Makefile)"
+# The honk core is tracked by commit, so the recorded release marker is the
+# same commit. A mismatch would make the daily job compare two different
+# things and rebuild on every run.
+test "$CORE_RELEASE" = "$CORE_COMMIT"
 test "$DOONA_ARCHIVE" = "$(sed -n 's/^PKG_SOURCE:=//p' luci-app-honk/Makefile)"
 grep -q '^PKG_HASH:=[0-9a-f]\{64\}$' luci-app-honk/Makefile
 
@@ -241,30 +245,28 @@ grep -Fq "isIpLiteral" luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.
 
 # The daily job reacts to upstream releases, not to branch heads, and stays
 # silent when the release tags it recorded are still the latest ones.
-grep -Fq "cron: '0 2 * * *'" .github/workflows/auto-bump.yml || {
-	echo 'the upstream check must run at 02:00 UTC, which is 10:00 in Asia/Shanghai' >&2
+grep -Fq "cron: '0 22 * * *'" .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must run at 22:00 UTC, which is 06:00 in Asia/Shanghai' >&2
 	exit 1
 }
 grep -Fq 'latest_release_tag' .github/workflows/auto-bump.yml || {
 	echo 'the upstream check must read published releases' >&2
 	exit 1
 }
-! grep -Fq 'git ls-remote' .github/workflows/auto-bump.yml || {
-	echo 'the upstream check must not follow a branch head' >&2
+# The honk core follows the upstream main branch head, which carries no
+# "this exact commit was published" guarantee. The upstream CI is the gate
+# instead: only a commit whose own required lanes are all green is accepted,
+# and the lane list is part of the workflow, not an assumption.
+grep -Fq 'latest_green_commit daeuniverse/honk main' .github/workflows/auto-bump.yml || {
+	echo 'the honk core must follow the upstream main branch head' >&2
 	exit 1
 }
-# The native API lives in the official upstream since PR #299 (2026-10-20).
-# Upstream ships it as an asset variant (-native-api) of its dated debug
-# releases, so a dated tag carries no "native-api" marker and the rolling
-# "debug" tag cannot signal a new build. The trigger must therefore be the
-# official repository's dated debug tag, and the commit has to be read from
-# the release body.
-grep -Fq 'latest_release_tag daeuniverse/honk' .github/workflows/auto-bump.yml || {
-	echo 'the upstream check must read the official daeuniverse/honk releases' >&2
+grep -Fq 'REQUIRED_LANES=' .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must gate the branch head on a list of CI lanes' >&2
 	exit 1
 }
-grep -Fq "repos/daeuniverse/honk/releases/tags/\$core_tag" .github/workflows/auto-bump.yml || {
-	echo 'the upstream check must read the built commit from the release body' >&2
+grep -Fq 'repos/$repo/commits/$sha/check-runs' .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must read the CI verdict of the candidate commit' >&2
 	exit 1
 }
 grep -Fq 'CORE_REPOSITORY=https://github.com/daeuniverse/honk.git' ci/pins.env || {

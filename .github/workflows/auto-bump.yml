@@ -5,8 +5,10 @@ name: Check honk/doona upstream
 
 on:
   schedule:
-    # 02:00 UTC is 10:00 in Asia/Shanghai.
-    - cron: '0 2 * * *'
+    # 22:00 UTC is 06:00 in Asia/Shanghai. Upstream's daily commit activity
+    # sits between roughly 12:00Z and 22:00Z, so this slot collects the whole
+    # day's changes in one run instead of testing a mid-flight state.
+    - cron: '0 22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -44,16 +46,8 @@ jobs:
             fi
           }
 
-          # The trigger is a published release, not a branch head: a release is
-          # what a reader can obtain, so the packages are built from exactly
-          # that commit.
-          #
-          # Upstream publishes the native API as an asset variant of its dated
-          # debug releases (honk-core-debug-...-native-api.tar.gz), not as a
-          # separate tag: a dated tag carries no "native-api" marker. The
-          # dated tag is therefore the only immutable upstream handle, and the
-          # rolling "debug" tag is excluded because its name never changes
-          # and it cannot signal that a new build was published.
+          # Doona publishes tagged releases, so the release tag is the trigger
+          # there: it is immutable, so an unchanged tag means nothing new.
           latest_release_tag() {
             local repo=$1 filter=${2:-} tag
             for tag in $(gh api "repos/$repo/releases?per_page=100" --jq '.[].tag_name'); do
@@ -66,32 +60,102 @@ jobs:
             return 1
           }
 
+          # The honk core is tracked by the upstream main branch head instead of
+          # a release tag. Upstream publishes dated debug tags only when
+          # somebody pushes one by hand, which is far less often than the
+          # upstream branch itself moves, so a tag-gated check would leave the
+          # package many commits behind.
+          #
+          # A branch head carries no "this exact commit was published"
+          # guarantee, so the upstream CI is the gate instead: only a commit
+          # whose own check runs are all green is accepted. Upstream runs its
+          # full lane set on every push to main, so the required lanes below
+          # are the ones that decide whether a commit is usable.
+          #
+          # The legacy commit status API reports "pending" with no entries for
+          # these commits, so the check runs API is the only usable source.
+          # A re-run of a lane produces a second entry under the same name;
+          # the highest id is the current verdict for that lane.
+          REQUIRED_LANES='changes|docs|fmt + clippy|cargo nextest (workspace)|cargo nextest (aarch64)|DNS smoke (release honk-core)|dae-config parser (conformance + fuzz replay)|eBPF feature compile guard|eBPF object + real VM kernel tests|eBPF real VM tests (recent kernel)|Independent feature sets|x86_64 musl release path'
+
+          lane_verdict() {
+            local repo=$1 sha=$2
+            gh api "repos/$repo/commits/$sha/check-runs?per_page=100" \
+              --jq '.check_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion)"' 2>/dev/null ||
+              printf ''
+          }
+
+          # Prints the commit when every required lane completed successfully.
+          # Anything else (a lane still running, a lane failed, a lane missing)
+          # means the commit is not proven yet.
+          #
+          # The verdict per lane is kept in a temporary file rather than a
+          # bash associative array, so the same script also runs on bash 3.2.
+          # A re-run of a lane produces a second entry under the same name;
+          # the highest check run id is the current verdict for that lane.
+          is_green() {
+            local repo=$1 sha=$2 id name status conclusion lane
+            local seen
+            seen="$(mktemp)"
+            while IFS=$'\t' read -r id name status conclusion; do
+              [ -n "$name" ] || continue
+              printf '%s\t%s\t%s\n' "$name" "$id" "$status $conclusion" >> "$seen"
+            done < <(lane_verdict "$repo" "$sha")
+            local ok=0
+            while IFS= read -r lane; do
+              [ -n "$lane" ] || continue
+              local verdict
+              verdict=$(awk -F'\t' -v lane="$lane" '
+                $1 == lane && $2 > best { best = $2; v = $3 }
+                END { print v }
+              ' "$seen")
+              if [ "$verdict" != "completed success" ]; then
+                echo "    lane '${lane}': ${verdict:-<missing>}" >&2
+                ok=1
+              fi
+            done < <(printf '%s' "$REQUIRED_LANES" | tr '|' '\n')
+            rm -f "$seen"
+            return "$ok"
+          }
+
+          # Walk back from the branch head until a proven-good commit is
+          # found. The head itself is the usual answer; the walk-back only
+          # matters while upstream's newest commit is still being tested.
+          latest_green_commit() {
+            local repo=$1 branch=$2 sha
+            for sha in $(gh api "repos/$repo/commits?sha=$branch&per_page=10" --jq '.[].sha'); do
+              # Diagnostics go to stderr: stdout carries the commit alone.
+              echo "  checking $sha" >&2
+              if is_green "$repo" "$sha"; then
+                printf '%s\n' "$sha"
+                return 0
+              fi
+            done
+            return 1
+          }
+
           doona_tag=$(latest_release_tag Zakkaus/doona) || {
             echo "::error::no doona release found"
             exit 1
           }
-          core_tag=$(latest_release_tag daeuniverse/honk '^debug\.[0-9]') || {
-            echo "::error::no honk dated debug release found"
+          core_new=$(latest_green_commit daeuniverse/honk main) || {
+            echo "::error::no upstream honk commit with a green CI"
             exit 1
           }
+          require_sha "$core_new" core
 
-          # A release tag is immutable, so the tag alone says whether an
-          # upstream release appeared. Nothing else is touched when the tags
-          # still match, which keeps the daily run silent.
-          if [ "$doona_tag" = "$DOONA_RELEASE" ] && [ "$core_tag" = "$CORE_RELEASE" ]; then
-            echo "No upstream release change."
+          # The doona trigger is an immutable release tag. The honk trigger
+          # is a commit, so the comparison is against the pinned commit: an
+          # unchanged commit means the branch head is still the one that was
+          # already built, and nothing is touched, which keeps the daily run
+          # silent.
+          if [ "$doona_tag" = "$DOONA_RELEASE" ] && [ "$core_new" = "$CORE_COMMIT" ]; then
+            echo "No upstream change."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           doona_new=$(gh api "repos/Zakkaus/doona/commits/$doona_tag" --jq .sha)
-          # Upstream states the built commit in the release body, so read it
-          # there instead of resolving the tag: the rolling debug tag moves
-          # under the same name, and a dated tag is only guaranteed to name
-          # the commit that was published.
-          core_new=$(gh api "repos/daeuniverse/honk/releases/tags/$core_tag" \
-            --jq '.body | capture("Commit: `(?<sha>[0-9a-f]{40})`").sha')
-          require_sha "$core_new" core
           require_sha "$doona_new" doona
 
           doona_version_new=$(curl -fsSL "https://raw.githubusercontent.com/Zakkaus/doona/$doona_new/package.json" | jq -r .version)
@@ -101,8 +165,8 @@ jobs:
           fi
 
           changes=""
-          if [ "$core_tag" != "$CORE_RELEASE" ]; then
-            changes="honk ${CORE_RELEASE}→${core_tag}"
+          if [ "$core_new" != "$CORE_COMMIT" ]; then
+            changes="honk ${CORE_COMMIT:0:7}→${core_new:0:7}"
           fi
           if [ "$doona_tag" != "$DOONA_RELEASE" ]; then
             changes="${changes:+$changes, }doona ${DOONA_RELEASE}→${doona_tag}"
@@ -111,7 +175,6 @@ jobs:
           {
             echo "changed=true"
             echo "core_new=$core_new"
-            echo "core_tag=$core_tag"
             echo "doona_new=$doona_new"
             echo "doona_tag=$doona_tag"
             echo "doona_version_new=$doona_version_new"
@@ -135,7 +198,6 @@ jobs:
           base_sha=$(git rev-parse HEAD)
           . ci/pins.env
           core_new='${{ steps.detect.outputs.core_new }}'
-          core_tag='${{ steps.detect.outputs.core_tag }}'
           doona_new='${{ steps.detect.outputs.doona_new }}'
           doona_tag='${{ steps.detect.outputs.doona_tag }}'
           today=$(TZ=Asia/Shanghai date +%Y.%m.%d)
@@ -156,7 +218,7 @@ jobs:
 
           sed -i \
             -e "s/^CORE_COMMIT=.*/CORE_COMMIT=$core_new/" \
-            -e "s/^CORE_RELEASE=.*/CORE_RELEASE=$core_tag/" \
+            -e "s/^CORE_RELEASE=.*/CORE_RELEASE=$core_new/" \
             -e "s/^DOONA_COMMIT=.*/DOONA_COMMIT=$doona_new/" \
             -e "s/^DOONA_RELEASE=.*/DOONA_RELEASE=$doona_tag/" \
             -e "s/^DOONA_VERSION=.*/DOONA_VERSION=${{ steps.detect.outputs.doona_version_new }}/" \

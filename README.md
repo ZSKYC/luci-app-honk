@@ -82,29 +82,36 @@ config rule 'honk_native_api_wan'    src=wan  dest_port=9527  target=REJECT
 
 核心和 Doona 的完整提交、Doona 的 OpenWrt 补丁摘要、apk-tools 与 `po2lmo` 的地址和 SHA256 全部固定在 `ci/pins.env`。
 
-> **上游状态**：`honk` 的原生 API 已于 2026-10-20 通过 PR #299 合入官方 [`daeuniverse/honk`](https://github.com/daeuniverse/honk) 的 `main`，本仓库直接锁定官方上游，不再依赖任何 fork 分支。上游把原生 API 作为 **资产变体**发布（`honk-core-debug-…-native-api.tar.gz`），而不是单独的 tag，因此 dated debug tag 名里没有 `native-api` 标记。
+> **上游状态**：`honk` 的原生 API 已于 2026-10-20 通过 PR #299 合入官方 [`daeuniverse/honk`](https://github.com/daeuniverse/honk) 的 `main`，本仓库直接锁定官方上游，不再依赖任何 fork 分支。核心按 `main` 分支头跟踪，并以该提交自己的上游 CI 全绿作为采纳条件。
 
 Doona 从源码构建，保留 OpenWrt 同源适配补丁；归档不含可选中文字体，浏览器使用系统字体。构建脚本从固定输入生成静态 UI、stock musl 核心和安装包。
 
-### 无人值守：每日一次的上游发布检查
+### 无人值守：每日一次的上游检查
 
-`auto-bump.yml` 每天北京时间上午 10:00（UTC 02:00）自动跑一次，检查两个上游仓库**是否发布了新的 release**：
+`auto-bump.yml` 每天北京时间早上 06:00（UTC 22:00）自动跑一次，检查两个上游是否有新内容：
 
 | 上游 | 检查对象 | 说明 |
 |---|---|---|
-| [Zakkaus/doona](https://github.com/Zakkaus/doona) | 最新的 release（含预发布） | 面板版本 |
-| [daeuniverse/honk](https://github.com/daeuniverse/honk) | 最新的 `debug.YYYY.M.DD.N` release | 官方上游；原生 API 自 2026-10-20 起已在 `main` 中，作为资产变体发布 |
+| [Zakkaus/doona](https://github.com/Zakkaus/doona) | 最新的 release（含预发布） | 面板版本；release tag 不可变，tag 相同即无新发布 |
+| [daeuniverse/honk](https://github.com/daeuniverse/honk) | `main` 分支头上**上游 CI 全绿**的提交 | 官方上游；原生 API 自 2026-10-20 起已在 `main` 中 |
 
-判断依据是 **release tag**，不是提交：release tag 不可变，tag 相同就说明没有新发布。这种情况下检查脚本直接结束，**不建分支、不提交、不触发构建**，整轮静默。
+两个上游的判定方式不同：
 
-一旦发现新 release，流水线会：
+- **Doona** 用 release tag。tag 不可变，tag 相同就说明没有新发布。
+- **Honk 核心**用提交。上游的 dated debug tag 需要人工推送，发布频率远低于 `main` 分支本身的变动频率，按 tag 检查会让包落后很多。分支头本身没有"这个提交已发布"的保证，因此**以该提交自己的上游 CI 判定**：只有必过的 12 条检查通道（workspace/aarch64 测试、eBPF 真实内核 VM 测试、musl 发布路径、fmt+clippy 等）全部 `success` 的提交才会被采纳。任一条仍在运行、失败或缺失，就回退到上一个全绿的提交。
 
-1. 解析出该 release 对应的提交，把 `ci/pins.env` 的 `CORE_COMMIT` / `DOONA_COMMIT` 与 `CORE_RELEASE` / `DOONA_RELEASE` 更新到该提交；
+上游的每日提交集中在 UTC 12:00–22:00 之间，把检查安排在 22:00 UTC，一轮即可收齐当天的全部改动，而不是拿一个当天稍晚就会被推翻的中间态。
+
+提交没变时检查脚本直接结束，**不建分支、不提交、不触发构建**，整轮静默。
+
+一旦发现新提交，流水线会：
+
+1. 把 `ci/pins.env` 的 `CORE_COMMIT` / `CORE_RELEASE` 更新到该提交，把 `DOONA_COMMIT` / `DOONA_RELEASE` 更新到新的 Doona release；
 2. 在独立分支上写入 pin、包版本与 Doona 归档哈希；
 3. 启动 `release.yml` 构建核心、Doona 和全部 6 个架构的安装包（单 job，无矩阵）。任一步失败就停止晋级；
 4. 全部通过后，才把验证过的提交和正式 tag 原子推送到 `main`，发布正式 Release，并更新软件源。
 
-包的构建来源始终是**上游 release 指向的那个提交**，而不是分支头：读者拿到的是发布版，构建的就应该也是发布版。
+包的构建来源是**上游 CI 已判定为全绿的那个提交**：既有分支头的时效，又有上游测试兜底，且每个提交上游都会跑完整的通道集合。
 
 手动触发同一条流水线：
 
