@@ -46,8 +46,14 @@ jobs:
 
           # The trigger is a published release, not a branch head: a release is
           # what a reader can obtain, so the packages are built from exactly
-          # that commit. The honk repository is the one carrying the native
-          # API; the upstream main branch does not provide it.
+          # that commit.
+          #
+          # Upstream publishes the native API as an asset variant of its dated
+          # debug releases (honk-core-debug-...-native-api.tar.gz), not as a
+          # separate tag: a dated tag carries no "native-api" marker. The
+          # dated tag is therefore the only immutable upstream handle, and the
+          # rolling "debug" tag is excluded because its name never changes
+          # and it cannot signal that a new build was published.
           latest_release_tag() {
             local repo=$1 filter=${2:-} tag
             for tag in $(gh api "repos/$repo/releases?per_page=100" --jq '.[].tag_name'); do
@@ -64,8 +70,8 @@ jobs:
             echo "::error::no doona release found"
             exit 1
           }
-          core_tag=$(latest_release_tag Glassyiris/honk 'native-api') || {
-            echo "::error::no honk release with the native API found"
+          core_tag=$(latest_release_tag daeuniverse/honk '^debug\.[0-9]') || {
+            echo "::error::no honk dated debug release found"
             exit 1
           }
 
@@ -79,7 +85,12 @@ jobs:
           fi
 
           doona_new=$(gh api "repos/Zakkaus/doona/commits/$doona_tag" --jq .sha)
-          core_new=$(gh api "repos/Glassyiris/honk/commits/$core_tag" --jq .sha)
+          # Upstream states the built commit in the release body, so read it
+          # there instead of resolving the tag: the rolling debug tag moves
+          # under the same name, and a dated tag is only guaranteed to name
+          # the commit that was published.
+          core_new=$(gh api "repos/daeuniverse/honk/releases/tags/$core_tag" \
+            --jq '.body | capture("Commit: `(?<sha>[0-9a-f]{40})`").sha')
           require_sha "$core_new" core
           require_sha "$doona_new" doona
 

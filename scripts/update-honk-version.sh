@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Manually advance the pinned honk-core revision (Glassyiris/honk feat/native-api).
+# Manually advance the pinned honk-core revision (daeuniverse/honk main).
 # The per-architecture tarballs and hashes are produced by the release workflow's
 # ci/build-core.sh, so this script only moves the source pin and bumps the version.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-UPSTREAM="${HONK_UPSTREAM_REPO:-https://github.com/Glassyiris/honk.git}"
-BRANCH="${HONK_UPSTREAM_BRANCH:-feat/native-api}"
+UPSTREAM="${HONK_UPSTREAM_REPO:-https://github.com/daeuniverse/honk.git}"
+BRANCH="${HONK_UPSTREAM_BRANCH:-main}"
 
 command -v git >/dev/null 2>&1 || { echo "error: git is required" >&2; exit 1; }
 

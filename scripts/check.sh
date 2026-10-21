@@ -253,6 +253,24 @@ grep -Fq 'latest_release_tag' .github/workflows/auto-bump.yml || {
 	echo 'the upstream check must not follow a branch head' >&2
 	exit 1
 }
+# The native API lives in the official upstream since PR #299 (2026-10-20).
+# Upstream ships it as an asset variant (-native-api) of its dated debug
+# releases, so a dated tag carries no "native-api" marker and the rolling
+# "debug" tag cannot signal a new build. The trigger must therefore be the
+# official repository's dated debug tag, and the commit has to be read from
+# the release body.
+grep -Fq 'latest_release_tag daeuniverse/honk' .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must read the official daeuniverse/honk releases' >&2
+	exit 1
+}
+grep -Fq "repos/daeuniverse/honk/releases/tags/\$core_tag" .github/workflows/auto-bump.yml || {
+	echo 'the upstream check must read the built commit from the release body' >&2
+	exit 1
+}
+grep -Fq 'CORE_REPOSITORY=https://github.com/daeuniverse/honk.git' ci/pins.env || {
+	echo 'the core pin must track the official daeuniverse/honk repository' >&2
+	exit 1
+}
 grep -Fq 'CORE_RELEASE=' ci/pins.env
 grep -Fq 'DOONA_RELEASE=' ci/pins.env
 # The SDK and its ~1 GB container are gone: the packages are built by

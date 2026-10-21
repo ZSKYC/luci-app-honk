@@ -82,7 +82,7 @@ config rule 'honk_native_api_wan'    src=wan  dest_port=9527  target=REJECT
 
 核心和 Doona 的完整提交、Doona 的 OpenWrt 补丁摘要、apk-tools 与 `po2lmo` 的地址和 SHA256 全部固定在 `ci/pins.env`。
 
-> **上游状态**：`honk` 的原生 API 目前只存在于 [`Glassyiris/honk`](https://github.com/Glassyiris/honk) 的 `feat/native-api` 分支，`daeuniverse/honk` 的 `main` 不提供该 API。Doona 官方文档同样写明"上游 daeuniverse/honk main 不提供该 API"。本仓库的 `ci/pins.env` 因此锁定的是前者。
+> **上游状态**：`honk` 的原生 API 已于 2026-10-20 通过 PR #299 合入官方 [`daeuniverse/honk`](https://github.com/daeuniverse/honk) 的 `main`，本仓库直接锁定官方上游，不再依赖任何 fork 分支。上游把原生 API 作为 **资产变体**发布（`honk-core-debug-…-native-api.tar.gz`），而不是单独的 tag，因此 dated debug tag 名里没有 `native-api` 标记。
 
 Doona 从源码构建，保留 OpenWrt 同源适配补丁；归档不含可选中文字体，浏览器使用系统字体。构建脚本从固定输入生成静态 UI、stock musl 核心和安装包。
 
@@ -93,7 +93,7 @@ Doona 从源码构建，保留 OpenWrt 同源适配补丁；归档不含可选�
 | 上游 | 检查对象 | 说明 |
 |---|---|---|
 | [Zakkaus/doona](https://github.com/Zakkaus/doona) | 最新的 release（含预发布） | 面板版本 |
-| [Glassyiris/honk](https://github.com/Glassyiris/honk) | 最新的 `debug.*native-api.*` release | 只有这一支带原生 API；`daeuniverse/honk` 的 `main` 不带 |
+| [daeuniverse/honk](https://github.com/daeuniverse/honk) | 最新的 `debug.YYYY.M.DD.N` release | 官方上游；原生 API 自 2026-10-20 起已在 `main` 中，作为资产变体发布 |
 
 判断依据是 **release tag**，不是提交：release tag 不可变，tag 相同就说明没有新发布。这种情况下检查脚本直接结束，**不建分支、不提交、不触发构建**，整轮静默。
 
