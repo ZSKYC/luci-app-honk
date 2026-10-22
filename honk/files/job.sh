@@ -34,6 +34,33 @@ esac
 [ "${#job_id}" -eq 32 ] || exit 2
 case "$operation" in backup|restore|reset|update_check|update_apply) ;; *) exit 2 ;; esac
 
+# The pids of the direct children of a process, read from /proc.
+child_pids() {
+	cp_parent=$1
+	for cp_stat in /proc/[0-9]*/stat; do
+		[ -r "$cp_stat" ] || continue
+		cp_line=$(cat "$cp_stat" 2>/dev/null) || continue
+		cp_tail=${cp_line##*) }
+		cp_rest=${cp_tail#* }
+		cp_ppid=${cp_rest%% *}
+		[ "$cp_ppid" = "$cp_parent" ] || continue
+		cp_name=${cp_stat#/proc/}
+		printf '%s\n' "${cp_name%/stat}"
+	done
+}
+
+# Signal a process and every process it started, children first. The
+# maintenance script starts a mock core, which would survive a kill of the
+# parent alone and keep the state directory locked.
+kill_tree() {
+	kt_signal=$1
+	kt_pid=$2
+	for kt_child in $(child_pids "$kt_pid"); do
+		kill_tree "$kt_signal" "$kt_child"
+	done
+	kill "-$kt_signal" "$kt_pid" 2>/dev/null || :
+}
+
 job_dir=$JOBS/$job_id
 [ -d "$JOBS" ] && [ ! -L "$JOBS" ] && [ -d "$job_dir" ] && [ ! -L "$job_dir" ] || exit 2
 [ "$(stat -c '%u:%a' "$JOBS" 2>/dev/null)" = 0:700 ] && [ "$(stat -c '%u:%a' "$job_dir" 2>/dev/null)" = 0:700 ] || exit 2
@@ -51,11 +78,28 @@ fi
 maint_pid=$!
 logger -t honk-maintenance "$operation started" 2>/dev/null || :
 # Total watchdog: never poll forever if maintenance.sh hangs.
+timed_out=0
 _poll_deadline=$(($(date +%s) + 1800))
 while kill -0 "$maint_pid" 2>/dev/null; do
 	if [ "$(date +%s)" -ge "$_poll_deadline" ]; then
-		logger -t honk-maintenance "$operation timed out after 1800s, killing $maint_pid" 2>/dev/null || :
-		kill -9 "$maint_pid" 2>/dev/null || :
+		timed_out=1
+		logger -t honk-maintenance "$operation timed out after 1800s, stopping $maint_pid" 2>/dev/null || :
+		# The maintenance script releases the lock, clears the journal and
+		# stops its mock core in its exit trap, so it is asked to stop first.
+		# The rollback inside it may restart the service, which takes up to
+		# half a minute.
+		kill -TERM "$maint_pid" 2>/dev/null || :
+		_grace=0
+		while [ "$_grace" -lt 60 ] && kill -0 "$maint_pid" 2>/dev/null; do
+			sleep 1
+			_grace=$((_grace + 1))
+		done
+		if kill -0 "$maint_pid" 2>/dev/null; then
+			# It did not exit: its whole process tree is killed, so that no
+			# mock core survives the timeout.
+			logger -t honk-maintenance "$operation timeout cleanup did not finish; killing the process tree of $maint_pid" 2>/dev/null || :
+			kill_tree KILL "$maint_pid"
+		fi
 		break
 	fi
 	journal_phase=$(sed -n 's/^phase=//p' /etc/.honk-maintenance/journal 2>/dev/null | sed -n '1p')
@@ -89,10 +133,16 @@ operation_rc=$?
 json_load "$(cat "$job_dir/output" 2>/dev/null)" 2>/dev/null || {
 	if [ -e /etc/.honk-maintenance/journal ] || [ -L /etc/.honk-maintenance/journal ] || [ -d /run/honk.lock ]; then
 		write_status rollback_required recovery false maintenance_recovery_required
+	elif [ "$timed_out" = 1 ]; then
+		write_status failed complete false job_timeout
 	else
 		write_status failed complete false operation_failed
 	fi
-	logger -t honk-maintenance "$operation failed (invalid result)" 2>/dev/null || :
+	if [ "$timed_out" = 1 ]; then
+		logger -t honk-maintenance "$operation timed out" 2>/dev/null || :
+	else
+		logger -t honk-maintenance "$operation failed (invalid result)" 2>/dev/null || :
+	fi
 	exit 1
 }
 json_get_var operation_ok ok
