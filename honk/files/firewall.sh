@@ -50,3 +50,19 @@ honk_firewall_remove() {
 	/etc/init.d/firewall reload >/dev/null 2>&1 || :
 	return 0
 }
+
+# The port the lan rule currently opens, empty when there is no rule.
+honk_firewall_current_port() {
+	command -v uci >/dev/null 2>&1 || return 1
+	uci -q get "firewall.$HONK_FIREWALL_LAN_SECTION.dest_port" 2>/dev/null
+}
+
+# Apply the rule only when the open port differs, so that a rollback does not
+# reload the firewall for nothing. Both rules are checked: the wan reject is
+# part of the same boundary.
+honk_firewall_sync() {
+	sync_port=$(honk_firewall_port "$1") || return 1
+	[ "$(honk_firewall_current_port)" = "$sync_port" ] && \
+		[ "$(uci -q get "firewall.$HONK_FIREWALL_WAN_SECTION.dest_port" 2>/dev/null)" = "$sync_port" ] && return 0
+	honk_firewall_apply "$sync_port"
+}

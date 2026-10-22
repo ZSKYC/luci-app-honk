@@ -30,3 +30,18 @@ honk_lock_release() {
 	[ "$owner" = "$$" ] && [ "$owner_start" = "$(_honk_proc_starttime $$)" ] || return 1
 	rm -f "$HONK_LOCK_DIR/pid" && rmdir "$HONK_LOCK_DIR"
 }
+
+# Whether the lock is held by the given process. The lock file stores
+# "pid starttime", so both columns are compared; comparing the whole file
+# with a bare pid can never match.
+honk_lock_owner_matches() {
+	owner_match_pid=$1
+	owner_match_start=$2
+	case "$owner_match_pid" in ''|*[!0-9]*) return 1 ;; esac
+	case "$owner_match_start" in ''|*[!0-9]*) return 1 ;; esac
+	[ -r "$HONK_LOCK_DIR/pid" ] || return 1
+	read -r owner_match_held_pid owner_match_held_start < "$HONK_LOCK_DIR/pid" || return 1
+	[ "$owner_match_held_pid" = "$owner_match_pid" ] || return 1
+	[ "$owner_match_held_start" = "$owner_match_start" ] || return 1
+	return 0
+}

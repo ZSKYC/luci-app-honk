@@ -165,7 +165,10 @@ consume_maintenance_capability() {
 		candidate_health_start:restore:new_installed|candidate_health_start:import_apply:new_installed|rollback_old_start:restore:rollback_old_start|rollback_old_start:reset:rollback_old_start|rollback_old_start:import_apply:rollback_old_start) ;;
 		*) return 1 ;;
 	esac
-	[ "$(cat "$HONK_LOCK_DIR/pid" 2>/dev/null)" = "$cap_pid" ] || return 1
+	# The lock file stores "pid starttime" (see lock.sh), so both columns are
+	# compared; comparing the whole file with a bare PID can never match and
+	# would block every restore and rollback.
+	honk_lock_owner_matches "$cap_pid" "$cap_starttime" || return 1
 	[ "$(proc_starttime "$cap_pid")" = "$cap_starttime" ] || return 1
 	return 0
 }
@@ -354,6 +357,21 @@ settings_rollback() {
 	if [ -n "$system_written_hash" ] && ! restore_system; then rollback_ok=0; fi
 	if ! uci import honk < "$old_uci" || ! uci commit honk; then rollback_ok=0; fi
 	if ! sync_boot_link "$old_boot_enabled"; then rollback_ok=0; fi
+	# The firewall may already have been switched to the new port; the rolled
+	# back configuration listens on the old one, so its rule is restored here.
+	rollback_port=$old_port
+	case "$rollback_port" in
+		''|*[!0-9]*) rollback_port=$(uci -q get honk.main.listen_port 2>/dev/null) ;;
+	esac
+	case "$rollback_port" in
+		''|*[!0-9]*) ;;
+		*)
+			honk_firewall_sync "$rollback_port" || {
+				rollback_ok=0
+				logger -t honk "native api firewall rollback failed for port $rollback_port"
+			}
+			;;
+	esac
 	restore_old_runtime || rollback_ok=0
 	[ "$rollback_ok" = 1 ]
 }
@@ -445,7 +463,7 @@ settings() {
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"settings_commit_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"settings_commit_and_rollback_failed_snapshot_retained"}'; fi
 		return 1
 	}
-	honk_firewall_apply "$new_port" || logger -t honk "native api firewall rule not applied for port $new_port"
+	honk_firewall_sync "$new_port" || logger -t honk "native api firewall rule not applied for port $new_port"
 	if ! sync_boot_link "$new_boot_enabled"; then
 		settings_rollback; rollback_status=$?
 		if [ "$rollback_status" = 0 ]; then rm -rf "$settings_dir"; echo '{"ok":false,"message":"boot_link_update_failed_rolled_back"}'; else logger -t honk "settings rollback failed; snapshot retained at $settings_dir"; echo '{"ok":false,"message":"boot_link_update_and_rollback_failed_snapshot_retained"}'; fi

@@ -24,6 +24,7 @@ CAPABILITY=$TXN_DIR/capability
 if [ "${HONK_MAINT_LIBRARY:-0}" != 1 ]; then
 	. /usr/share/honk/lock.sh || exit 1
 	. /usr/share/honk/lifecycle.sh || exit 1
+	. /usr/share/honk/firewall.sh || exit 1
 	. /usr/share/libubox/jshn.sh || exit 1
 fi
 
@@ -241,6 +242,18 @@ recover_transaction() {
 	fi
 	if ! uci import honk < "$old_uci_snapshot" || ! uci commit honk; then return 1; fi
 	restore_boot_links || return 1
+	if [ "$journal_operation" = restore ] || [ "$journal_operation" = reset ]; then
+		# The rolled back configuration listens on the old port again, so the
+		# firewall rule has to be moved back with it.
+		rollback_port=$(uci -q get honk.main.listen_port 2>/dev/null)
+		case "$rollback_port" in
+			''|*[!0-9]*) ;;
+			*)
+				honk_firewall_sync "$rollback_port" || \
+					echo "honk maintenance: firewall rollback to port $rollback_port failed" >&2
+				;;
+		esac
+	fi
 	if [ "$old_running" = 1 ]; then
 		if ! managed_core_pid >/dev/null 2>&1; then
 	if [ "$journal_operation" = restore ] || [ "$journal_operation" = reset ]; then
@@ -477,6 +490,39 @@ checkpoint_sqlite() {
 		fi
 	done
 	[ ! -e "$HONK_STATE-wal" ] && [ ! -e "$HONK_STATE-shm" ]
+}
+
+# Clear the business state in a state database and keep the administrator
+# record. The upstream core has no command for this: `admin reset` only
+# deletes the administrator, so every table but `admin` is emptied here.
+reset_business_state() {
+	reset_db=$1
+	if [ ! -e "$reset_db" ]; then return 0; fi
+	[ -f "$reset_db" ] && [ ! -L "$reset_db" ] || return 1
+	command -v sqlite3 >/dev/null 2>&1 || return 1
+	reset_tables=$(sqlite3 "$reset_db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'admin';" 2>/dev/null) || return 1
+	for reset_table in $reset_tables; do
+		case "$reset_table" in
+			*[!A-Za-z0-9_]*) return 1 ;;
+		esac
+		sqlite3 "$reset_db" "DELETE FROM \"$reset_table\";" >/dev/null 2>&1 || return 1
+	done
+	# The deletes may sit in a write ahead log; the log has to be folded into
+	# the database before the sidecar files are removed, or the reset would
+	# silently keep the old rows.
+	reset_checkpoint=$(sqlite3 "$reset_db" 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null) || return 1
+	case "$reset_checkpoint" in
+		0\|[0-9]*\|[0-9]*|0\|-1\|-1) ;;
+		*) return 1 ;;
+	esac
+	reset_busy=${reset_checkpoint%%|*}
+	reset_rest=${reset_checkpoint#*|}
+	reset_log=${reset_rest%%|*}
+	reset_done=${reset_rest#*|}
+	[ "$reset_busy" = 0 ] && [ "$reset_log" = "$reset_done" ] || return 1
+	rm -f "$reset_db-wal" "$reset_db-shm" 2>/dev/null || return 1
+	[ ! -e "$reset_db-wal" ] && [ ! -e "$reset_db-shm" ] || return 1
+	return 0
 }
 
 is_excluded() {
@@ -991,6 +1037,11 @@ restore() {
 	if [ "$apply_failed" = 0 ]; then
 		load_uci_values || apply_failed=1
 		[ "$apply_failed" = 1 ] || [ "$u_enabled:$u_boot:$u_initialized" = "$old_enabled:$old_boot:$restore_initialized" ] || apply_failed=1
+		# A restored archive can carry a different api port; the firewall rule
+		# has to follow it before the core starts, or the panel is unreachable.
+		if [ "$apply_failed" = 0 ]; then
+			honk_firewall_sync "$u_port" || apply_failed=1
+		fi
 		if [ "$apply_failed" = 0 ] && [ "$old_running" = 1 ]; then
 			issue_capability candidate_health_start || apply_failed=1
 		fi
@@ -1033,7 +1084,8 @@ reset_data() {
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" import honk < "$temp_dir/old-uci" || { error reset_profile_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set honk.main.enabled=0 || { error reset_profile_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set honk.main.boot_enabled=0 || { error reset_profile_stage_failed; return 1; }
-	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set honk.main.listen_port=9527 || { error reset_profile_stage_failed; return 1; }
+	reset_port=9527
+	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set "honk.main.listen_port=$reset_port" || { error reset_profile_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" set honk.main.lan_network=lan || { error reset_profile_stage_failed; return 1; }
 	uci -c "$reset_uci" -t "$temp_dir/uci-tmp" commit honk || { error reset_profile_stage_failed; return 1; }
 	load_uci_values uci "$reset_uci" || { error reset_profile_stage_failed; return 1; }
@@ -1042,7 +1094,7 @@ reset_data() {
 	reset_ip=
 	network_get_device reset_device "$u_network" || { error lan_network_unavailable; return 1; }
 	network_get_ipaddr reset_ip "$u_network" || { error lan_network_unavailable; return 1; }
-	write_live_system "$reset_stage/etc/honk/system.dae" "$reset_device" "$reset_ip" "$u_port" "$u_initialized" || { error system_config_render_failed; return 1; }
+	write_live_system "$reset_stage/etc/honk/system.dae" "$reset_device" "$reset_ip" "$reset_port" "$u_initialized" || { error system_config_render_failed; return 1; }
 	chmod 0444 "$reset_stage/etc/honk/system.dae" || { error system_config_render_failed; return 1; }
 	reset_candidate=$temp_dir/reset-candidate
 	mkdir -p "$reset_candidate/etc" || { error reset_stage_failed; return 1; }
@@ -1061,7 +1113,10 @@ reset_data() {
 	checkpoint_sqlite || { restore_abort sqlite_checkpoint_failed; return 1; }
 	rm -rf "$reset_stage/etc/honk" || { restore_abort reset_stage_failed; return 1; }
 	stage_reset_tree "$HONK_ROOT" "$reset_stage/etc/honk" "$reset_candidate/etc/honk/system.dae" /usr/share/honk/default-config.dae || { restore_abort reset_stage_failed; return 1; }
-	DAE_LOCATION_ASSET=/usr/share/v2ray "$HONK_CORE" --config "$reset_stage/etc/honk/config.dae" --data-dir "$reset_stage/etc/honk" admin reset-business --revision-root /etc/honk >/dev/null 2>&1 || { restore_abort state_reset_failed; return 1; }
+	# The upstream core has no "reset business state" command: `admin reset`
+	# only deletes the administrator. The business tables are cleared here and
+	# the administrator record is kept, as the reset is documented to do.
+	reset_business_state "$reset_stage/etc/honk/state/honk.db" || { restore_abort state_reset_failed; return 1; }
 	reset_archive_state=absent
 	if [ -f "$reset_stage/etc/honk/state/honk.db" ]; then reset_archive_state=present; fi
 	if [ "$reset_archive_state" = present ]; then archive_sqlite_check "$reset_stage/etc/honk/state/honk.db" || { restore_abort state_reset_validation_failed; return 1; }; fi
@@ -1083,7 +1138,10 @@ reset_data() {
 	journal_write new_installed || { restore_abort transaction_journal_write_failed; return 1; }
 	uci import honk < "$temp_dir/new-uci" && uci commit honk || { restore_abort reset_failed; return 1; }
 	load_uci_values || { restore_abort reset_failed; return 1; }
-	[ "$u_enabled:$u_boot:$u_initialized:$u_network:$u_port" = "0:0:$old_initialized:lan:9527" ] || { restore_abort reset_failed; return 1; }
+	[ "$u_enabled:$u_boot:$u_initialized:$u_network:$u_port" = "0:0:$old_initialized:lan:$reset_port" ] || { restore_abort reset_failed; return 1; }
+	# The reset moves the api to the default port; the firewall rule has to
+	# follow it, or the panel stays unreachable and the old port stays open.
+	honk_firewall_sync "$u_port" || { restore_abort firewall_update_failed; return 1; }
 	disable_boot_links || { restore_abort boot_link_update_failed; return 1; }
 	journal_write uci_applied || { restore_abort transaction_journal_write_failed; return 1; }
 	journal_write committed || { restore_abort transaction_journal_write_failed; return 1; }

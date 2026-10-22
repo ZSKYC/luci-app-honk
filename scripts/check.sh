@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
-for tool in bash sh node sha256sum git tar; do
+for tool in bash sh node sha256sum git tar sqlite3; do
 	command -v "$tool" >/dev/null || { echo "Missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -149,6 +149,31 @@ test "$(cat "$reset_fixture/new/etc/honk/system.dae")" = 'system config'
 test "$(cat "$reset_fixture/new/etc/honk/state/honk.db")" = 'administrator-preserved'
 test ! -e "$reset_fixture/new/etc/honk/extra.dae"
 rm -rf "$reset_fixture"
+
+# The data reset clears the business state and keeps the administrator
+# record: the upstream core has no command for it.
+state_fixture=$(mktemp -d)
+sqlite3 "$state_fixture/honk.db" "CREATE TABLE admin (id INTEGER PRIMARY KEY, record TEXT NOT NULL);
+INSERT INTO admin (id, record) VALUES (1, 'administrator');
+CREATE TABLE selector (grp TEXT, network TEXT, member TEXT);
+INSERT INTO selector (grp, network, member) VALUES ('g', 'tcp', 'n');
+CREATE TABLE dns_answer (key TEXT, expire_at INTEGER, entry BLOB);
+INSERT INTO dns_answer (key, expire_at, entry) VALUES ('k', 0, x'00');"
+reset_business_state "$state_fixture/honk.db"
+test "$(sqlite3 "$state_fixture/honk.db" 'SELECT count(*) FROM admin;')" = 1
+test "$(sqlite3 "$state_fixture/honk.db" 'SELECT count(*) FROM selector;')" = 0
+test "$(sqlite3 "$state_fixture/honk.db" 'SELECT count(*) FROM dns_answer;')" = 0
+rm -rf "$state_fixture"
+
+# The lock file stores "pid starttime"; both columns have to match.
+lock_fixture=$(mktemp -d)
+. honk/files/lock.sh
+HONK_LOCK_DIR="$lock_fixture"
+printf '%s %s\n' 4242 987654 > "$HONK_LOCK_DIR/pid"
+honk_lock_owner_matches 4242 987654
+! honk_lock_owner_matches 4242 111111
+! honk_lock_owner_matches 4243 987654
+rm -rf "$lock_fixture"
 
 grep -Fq 'include $(INCLUDE_DIR)/package.mk' luci-app-honk/Makefile
 grep -Fq '$(eval $(call BuildPackage,luci-app-honk))' luci-app-honk/Makefile
