@@ -275,6 +275,18 @@ grep -Fq 'CORE_REPOSITORY=https://github.com/daeuniverse/honk.git' ci/pins.env |
 }
 grep -Fq 'CORE_RELEASE=' ci/pins.env
 grep -Fq 'DOONA_RELEASE=' ci/pins.env
+# The Rust toolchains are read back from the pinned upstream checkout, not
+# pinned here: upstream moves them on its own schedule (the eBPF nightly moved
+# on 2026-10-22), and a stale local nightly cannot compile the eBPF object at
+# all — the build dies inside honk-core's build.rs with a missing rust-src.
+grep -Fq 'crates/honk-ebpf/rust-toolchain.toml' ci/build-core.sh || {
+	echo 'the core build must take the eBPF toolchain from the upstream checkout' >&2
+	exit 1
+}
+! grep -q '^NIGHTLY=' ci/pins.env || {
+	echo 'the Rust nightly must not be pinned in ci/pins.env' >&2
+	exit 1
+}
 # The SDK and its ~1 GB container are gone: the packages are built by
 # ci/build-apk.sh with apk-tools directly. Both of these are load-bearing, so a
 # reintroduction should be a deliberate decision rather than a stray line.

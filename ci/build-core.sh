@@ -47,10 +47,24 @@ git -C "$WORK_DIR/source" checkout --quiet "$CORE_COMMIT"
 test "$(git -C "$WORK_DIR/source" rev-parse HEAD)" = "$CORE_COMMIT"
 test -f "$WORK_DIR/source/Cargo.lock"
 
-TOOLCHAIN=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' "$WORK_DIR/source/rust-toolchain.toml")
+# Both toolchains are read back from the pinned upstream checkout instead of
+# being pinned here: honk-core builds with the workspace stable toolchain and
+# the eBPF object with the nightly that crates/honk-ebpf pins. Upstream moves
+# those pins on its own schedule (PR #333 moved the eBPF nightly from
+# 2026-07-20 to 2026-10-20), and a local pin silently rots into a build that
+# cannot compile the eBPF object at all.
+channel_of() {
+	sed -n 's/^channel = "\([^"]*\)"/\1/p' "$1" | head -n 1
+}
+TOOLCHAIN=$(channel_of "$WORK_DIR/source/rust-toolchain.toml")
+EBPF_TOOLCHAIN=$(channel_of "$WORK_DIR/source/crates/honk-ebpf/rust-toolchain.toml")
 test -n "$TOOLCHAIN"
+test -n "$EBPF_TOOLCHAIN"
 rustup toolchain install "$TOOLCHAIN" --profile minimal --component rust-src
-rustup toolchain install "$NIGHTLY" --profile minimal --component rust-src --component llvm-tools
+# rust-src is not optional: the eBPF object is compiled with -Zbuild-std=core,
+# which needs the nightly's standard library sources. A nightly installed
+# without it fails inside build.rs with "Cargo.lock does not exist".
+rustup toolchain install "$EBPF_TOOLCHAIN" --profile minimal --component rust-src --component llvm-tools
 # Only the architectures this invocation actually builds. The release pipeline
 # runs one architecture per matrix leg, and installing musl std for the other
 # two on every leg is pure download time.
@@ -77,10 +91,16 @@ case "$BPF_LINKER_REPORTED_VERSION" in
 	*) echo "Unexpected bpf-linker self-reported version: $BPF_LINKER_REPORTED_VERSION" >&2; exit 1 ;;
 esac
 
-# The eBPF object is target-independent; build it once and let build.rs reuse it.
+# The eBPF object is target-independent; build it once and let build.rs reuse
+# it. Upstream's build.rs only reuses an object that carries a sidecar naming
+# the toolchain it was built with, so write that sidecar as well — otherwise
+# every honk-core build recompiles the object from scratch. --locked is not
+# used here on purpose: upstream builds the very same object without it, so a
+# stale crates/honk-ebpf/Cargo.lock must not fail a build upstream calls green.
 cd "$WORK_DIR/source/crates/honk-ebpf"
-cargo +"$NIGHTLY" build --locked --release -Zbuild-std=core --target bpfel-unknown-none
+cargo +"$EBPF_TOOLCHAIN" build --release -Zbuild-std=core --target bpfel-unknown-none
 readelf -S target/bpfel-unknown-none/release/honk-ebpf | rg -q '\.BTF'
+printf '%s' "$EBPF_TOOLCHAIN" > target/bpfel-unknown-none/release/honk-ebpf.toolchain
 
 # Doona stays on disk (/usr/share/doona) and is served by luci-app-honk, so the
 # core only needs the native-api backend, not the embedded UI (native-ui).
