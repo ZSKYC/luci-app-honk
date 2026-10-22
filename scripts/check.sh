@@ -197,6 +197,13 @@ grep -Fq '@(x86_64||aarch64||arm)' honk/Makefile
 grep -Fq '$(INSTALL_BIN) $(CURDIR)/files/update.sh' honk/Makefile
 
 grep -Fq '+@KERNEL_DEBUG_INFO_BTF' honk/Makefile
+grep -Fq '+curl' honk/Makefile
+grep -Fq '+curl' luci-app-honk/Makefile
+# The upgrade path restarts the service: default_postinst starts it while
+# procd's stop from the upgrade is still running, which leaves the service
+# "active with no instances".
+grep -Fq 'PKG_UPGRADE' honk/Makefile
+grep -Fq '/etc/init.d/honk restart' honk/Makefile
 grep -Fq "! rg -n 'MockBackend|mockBackend|mock-backend' dist" ci/build-doona.sh
 ! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh || {
 	echo 'the mock backend guard is missing from ci/build-doona.sh' >&2

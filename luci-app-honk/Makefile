@@ -25,7 +25,7 @@ define Package/luci-app-honk
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
   TITLE:=LuCI support for Honk
-  DEPENDS:=+honk +rpcd +luci-base +cgi-io +jsonfilter +libubox
+  DEPENDS:=+honk +rpcd +luci-base +cgi-io +jsonfilter +libubox +curl
   PKGARCH:=all
   URL:=https://github.com/szwjp/luci-app-honk
   MAINTAINER:=szwjp

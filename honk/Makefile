@@ -54,7 +54,7 @@ define Package/honk
   SUBMENU:=Web Servers/Proxies
   TITLE:=Honk transparent proxy core
   URL:=https://github.com/daeuniverse/honk
-  DEPENDS:=@(x86_64||aarch64||arm) +ca-bundle +ip-full +ubus +kmod-sched-core +kmod-sched-bpf +kmod-veth +kmod-nft-queue +jsonfilter +jshn +sqlite3-cli +libubox +usign +coreutils-stat +v2ray-geoip +v2ray-geosite +@KERNEL_DEBUG_INFO_BTF
+  DEPENDS:=@(x86_64||aarch64||arm) +ca-bundle +curl +ip-full +ubus +kmod-sched-core +kmod-sched-bpf +kmod-veth +kmod-nft-queue +jsonfilter +jshn +sqlite3-cli +libubox +usign +coreutils-stat +v2ray-geoip +v2ray-geosite +@KERNEL_DEBUG_INFO_BTF
 endef
 
 define Package/honk/description
@@ -119,6 +119,15 @@ define Package/honk/postinst
 port=$(uci -q get honk.main.listen_port)
 [ -n "$port" ] || port=9527
 honk_firewall_apply "$port" || exit 0
+# default_postinst starts the service, but procd's stop is asynchronous: apk
+# stops the old service right before this script runs, so the start collides
+# with the stop that is still running and the service ends up "active with no
+# instances". A restart waits for the stop to finish and brings the upgraded
+# core up. A fresh install has no PKG_UPGRADE and keeps the plain start.
+if [ "$${PKG_UPGRADE}" = "1" ]; then
+	logger -t honk "restarting after package upgrade"
+	/etc/init.d/honk restart
+fi
 exit 0
 endef
 

@@ -26,6 +26,51 @@ esac
 LOCK="/tmp/luci-app-honk.pkg-${PKG}.lock"
 LOG="/tmp/luci-app-honk.pkg-${PKG}.log"
 
+# The lifecycle helper reports whether the core runs and owns its api
+# listener; the upgrade check needs it before and after the package change.
+if [ -r /usr/share/honk/lifecycle.sh ]; then
+	. /usr/share/honk/lifecycle.sh
+fi
+
+# The installed version of the named package, empty when it is not installed.
+installed_version() {
+	apk list --installed 2>/dev/null | awk -v p="$PKG" '$1 ~ "^" p "-[0-9]" { print $1; exit }'
+}
+
+# Whether the managed core runs and answers on its api listener.
+honk_core_ready() {
+	hr_pid=$(honk_lifecycle_managed_pid 2>/dev/null) || return 1
+	[ -n "$hr_pid" ] || return 1
+	honk_lifecycle_api_owned "$hr_pid" "" >/dev/null 2>&1 || return 1
+	return 0
+}
+
+# Wait for the core to come up and answer on its api listener.
+wait_honk_ready() {
+	wr_timeout=${1:-60}
+	wr_wait=0
+	while [ "$wr_wait" -lt "$wr_timeout" ]; do
+		honk_core_ready && return 0
+		sleep 1
+		wr_wait=$((wr_wait + 1))
+	done
+	return 1
+}
+
+# Recovery for an upgraded core that did not come up: drain whatever is
+# running and start the new binary.
+restart_honk_service() {
+	[ -x /etc/init.d/honk ] || { echo "honk: init script is missing"; return 1; }
+	[ -r /usr/share/honk/lifecycle.sh ] || { echo "honk: lifecycle helper is missing"; return 1; }
+	. /usr/share/honk/lifecycle.sh || { echo "honk: lifecycle helper cannot be loaded"; return 1; }
+	echo "honk: draining the running core"
+	honk_lifecycle_stop 60 || { echo "honk: the old core did not drain"; return 1; }
+	echo "honk: starting the upgraded core"
+	honk_lifecycle_start 60 || { echo "honk: the upgraded core did not become ready"; return 1; }
+	echo "honk: restarted on the upgraded core"
+	return 0
+}
+
 if [ -f "$LOCK" ]; then
 	mtime=$(date -r "$LOCK" +%s 2>/dev/null || echo 0)
 	age=$(( $(date +%s) - mtime ))
@@ -48,6 +93,10 @@ fi
 	echo "$(date '+%F %T') begin upgrade: $PKG"
 
 	if command -v apk >/dev/null 2>&1; then
+		before_version=$(installed_version)
+		was_running=0
+		command -v honk_lifecycle_managed_pid >/dev/null 2>&1 && \
+			honk_lifecycle_managed_pid >/dev/null 2>&1 && was_running=1
 		(
 			flock 9
 			apk update 2>&1
@@ -68,18 +117,35 @@ fi
 			exit 0
 		) 9>/tmp/luci-app-honk.apk.lock
 		rc=$?
+		after_version=$(installed_version)
+		pkg_result=
 		if [ "$rc" != 0 ]; then
-			:
+			pkg_result="the upgrade command failed"
 		elif ! apk list --installed 2>/dev/null | grep -q "^${PKG}-"; then
-			echo "result: $PKG is not installed"
+			pkg_result="$PKG is not installed"
 			rc=1
 		elif apk list -u 2>/dev/null | grep -q "^${PKG}-"; then
-			echo "result: $PKG still has a pending upgrade"
+			pkg_result="$PKG still has a pending upgrade"
 			rc=1
 		else
-			echo "result: $PKG is at the latest available version"
+			pkg_result="$PKG is at the latest available version"
 			rc=0
 		fi
+		if [ "$rc" = 0 ] && [ "$PKG" = "honk" ] && [ "$before_version" != "$after_version" ] && [ "$was_running" = 1 ]; then
+			# The package postinst restarts the service on the upgrade path;
+			# wait for the new core to own its api and recover it when the
+			# restart did not bring it up.
+			if wait_honk_ready 60; then
+				echo "honk: the upgraded core is ready"
+			else
+				echo "honk: the upgraded core did not come up, restarting it"
+				restart_honk_service || {
+					pkg_result="honk was upgraded but the service did not restart"
+					rc=1
+				}
+			fi
+		fi
+		[ -z "$pkg_result" ] || echo "result: $pkg_result"
 	else
 		echo "no package manager found"
 		exit 3

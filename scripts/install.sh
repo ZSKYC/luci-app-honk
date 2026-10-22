@@ -107,6 +107,13 @@ main() {
 	fi
 	EXT=apk
 
+	# honk 的脚本用 curl 访问 native api 与更新源；官方镜像默认只有
+	# uclient-fetch。curl 是包的依赖，装包时会自动补上，但源不可用时
+	# 安装会失败，所以先提示。
+	if ! command -v curl >/dev/null 2>&1; then
+		echo "注意：系统缺少 curl，请确认软件源可用（否则安装会失败）：$PM add curl" >&2
+	fi
+
 	echo "检测到：架构 $ARCH · SDK $SDK · $PM"
 
 	release_json="$(fetch_text "$GH_API")"
