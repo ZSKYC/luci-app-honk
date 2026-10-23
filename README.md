@@ -50,8 +50,9 @@ export GH_PROXY=https://ghfast.top
 wget -O - https://raw.githubusercontent.com/szwjp/luci-app-honk/refs/heads/main/scripts/install.sh | ash
 ```
 
-`GH_PROXY` 只给 release 资产的下载加一层前缀，脚本本身仍然从 GitHub 直取。代理只影响传输，
-安装包本身由 release 里的 `SHA256SUMS` 与签名公钥校验，代理被劫持也装不进别的东西。
+`GH_PROXY` 只给 release 资产的下载加一层前缀，脚本本身仍然从 GitHub 直取。`SHA256SUMS`
+文件的 sha256 摘要从 `api.github.com`（不走代理）读取并校验，代理即使替换了校验文件或公钥
+也会被拒；校验通过后，公钥再装入 `/etc/apk/keys` 并由 apk 校验安装包的签名。
 
 卸载：
 
@@ -64,9 +65,17 @@ wget -O - https://raw.githubusercontent.com/szwjp/luci-app-honk/refs/heads/main/
 一键脚本会复用设备已有的 Geo 数据包；缺少时从聚合源下载，下载失败则尝试设备现有软件源。
 
 脚本的下载链是完整的：它只挑**正式版** release（跳过 `source-*` / `candidate-*`
-预发布），逐个安装包比对 release 里的 `SHA256SUMS`，再把同一 release 发布的签名公钥
-装进 `/etc/apk/keys/`，最后用普通 `apk add` 安装——签名对不上就装不进去。第三方代理
-只是可选的传输层加速，坏了也换不出别的东西来。
+预发布），先用 GitHub API 记录的 `SHA256SUMS` 摘要锚定校验文件，再逐个安装包比对
+`SHA256SUMS`，把同一 release 发布的签名公钥装进 `/etc/apk/keys/`，最后用普通
+`apk add` 安装——签名对不上就装不进去。第三方代理只是可选的传输层加速：它能影响
+可用性，但无法替换校验文件、公钥或安装包。
+
+Doona 面板资源随 `honk` 包发布。升级时请同时升级 `honk` 与 `luci-app-honk`；在 LuCI
+维护页升级 `luci-app-honk` 会先升级 `honk`，避免旧 `honk` 的依赖文件被新 LuCI 包删掉。
+
+委派权限时分两级：只读用户授予 `luci-app-honk-read`（概览与日志）；需要维护、更新、
+备份恢复等操作的管理员同时授予 `luci-app-honk-read` 与 `luci-app-honk-admin`。维护页
+只对 admin 角色可见。
 
 ---
 
@@ -78,6 +87,10 @@ wget -O - https://raw.githubusercontent.com/szwjp/luci-app-honk/refs/heads/main/
 config rule 'honk_native_api_lan'    src=lan  dest_port=9527  target=ACCEPT
 config rule 'honk_native_api_wan'    src=wan  dest_port=9527  target=REJECT
 ```
+
+如果设备上还有其它 firewall zone（guest、iot 等），脚本会为每个 zone 生成一条
+`honk_native_api_reject_<zone>` 的 REJECT 规则；`src=lan` 会按 `honk.main.lan_network`
+实际所属的 zone 生成，而不是固定写死 `lan`。
 
 这两条规则由 `honk` 包在安装、初始化、改端口和系统修复时写入 `/etc/config/firewall`，卸载时移除。
 

@@ -108,6 +108,16 @@ fi
 		(
 			flock 9
 			apk update 2>&1
+			if [ "$PKG" = "luci-app-honk" ] && apk info -e honk >/dev/null 2>&1; then
+				# The panel assets moved from luci-app-honk into honk. Upgrade
+				# honk first: upgrading this package alone would remove
+				# /usr/share/doona while the installed honk still requires it.
+				echo "--- apk add honk (the panel assets live in the honk package now) ---"
+				apk add honk 2>&1 || {
+					echo "result: the honk package upgrade failed; refusing to remove the panel assets"
+					exit 1
+				}
+			fi
 			ver=$(apk list "$PKG" 2>/dev/null | awk -v p="$PKG" '$1 ~ "^" p "-[0-9]" { v=$1; sub("^" p "-", "", v); print v }' | sort -V | tail -1)
 			if [ -n "$ver" ]; then
 				constraint="$PKG=$ver"

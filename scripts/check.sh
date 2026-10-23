@@ -559,5 +559,82 @@ awk '/^define Package\/honk\/postrm$/,/^endef$/' honk/Makefile |
 	exit 1
 }
 
+# The reject rules for extra firewall zones must build their section name with
+# braces: "$PREFIX_$zone" expands the unset variable PREFIX_ and overwrites the
+# existing zone section instead of creating a honk rule.
+grep -Fq 'fw_section="${HONK_FIREWALL_REJECT_PREFIX}_$fw_zone"' honk/files/firewall.sh
+! grep -Fq 'fw_section="$HONK_FIREWALL_REJECT_PREFIX_$fw_zone"' honk/files/firewall.sh
+grep -Fq 'sync_section="${HONK_FIREWALL_REJECT_PREFIX}_$sync_zone"' honk/files/firewall.sh
+# A zone change with the same port must still rebuild the rules.
+grep -Fq 'firewall.$HONK_FIREWALL_LAN_SECTION.src' honk/files/firewall.sh
+grep -Fq 'honk_firewall_lan_zone 2>/dev/null' honk/files/firewall.sh
+
+# Behavioural check: a zone change with an unchanged port must rebuild the
+# rules, while an already-current state must not reload the firewall.
+bash <<'BASH'
+set -eu
+. honk/files/firewall.sh
+lan_src=old
+lan_port=9527
+wan_port=9527
+extra_src=old
+uci() {
+	case "$*" in
+		"-q get honk.main.lan_network") echo lan ;;
+		"-q get firewall.honk_native_api_lan.dest_port") echo "$lan_port" ;;
+		"-q get firewall.honk_native_api_lan.src") echo "$lan_src" ;;
+		"-q get firewall.honk_native_api_wan.dest_port") echo "$wan_port" ;;
+		"-q get firewall.honk_native_api_reject_guest.src") echo "$extra_src" ;;
+		"-q get firewall.honk_native_api_reject_guest.dest_port") echo 9527 ;;
+		"-q show firewall") printf "firewall.lan.network='lan'\nfirewall.wan.network='wan'\nfirewall.guest.network='guest'\n" ;;
+		*) return 1 ;;
+	esac
+}
+applied=0
+honk_firewall_apply() { applied=$((applied + 1)); lan_src=lan; extra_src=guest; return 0; }
+honk_firewall_sync 9527
+[ "$applied" -eq 1 ] || { echo 'firewall sync did not rebuild after a zone change' >&2; exit 1; }
+applied=0
+honk_firewall_sync 9527
+[ "$applied" -eq 0 ] || { echo 'firewall sync rebuilt an already-current state' >&2; exit 1; }
+lan_port=9999
+applied=0
+honk_firewall_sync 9527
+[ "$applied" -eq 1 ] || { echo 'firewall sync did not rebuild after a port change' >&2; exit 1; }
+BASH
+
+# Menu ACL names must be real ACL groups: LuCI resolves depends.acl against
+# the rpcd access-group names and hides/403s an unknown group.
+node <<'NODE'
+const fs = require('fs');
+const menu = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json', 'utf8'));
+const groups = new Set();
+for (const file of ['luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-read.json',
+                    'luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json']) {
+	for (const group of Object.keys(JSON.parse(fs.readFileSync(file, 'utf8'))))
+		groups.add(group);
+}
+for (const [name, node] of Object.entries(menu)) {
+	for (const acl of node?.depends?.acl || []) {
+		if (!groups.has(acl))
+			throw new Error(`menu node ${name} refers to unknown ACL group ${acl}`);
+	}
+}
+if (!menu['admin/services/honk']?.depends?.acl?.includes('luci-app-honk-read'))
+	throw new Error('the honk menu must be visible with the read role');
+NODE
+
+# The installer anchors SHA256SUMS with the GitHub API digest and uses a
+# private mktemp directory instead of a predictable /tmp path.
+grep -Fq 'asset_digest' scripts/install.sh
+grep -Fq 'mktemp -d "${TMPDIR:-/tmp}/honk-install.XXXXXX"' scripts/install.sh
+! grep -Fq 'TMP_DIR="/tmp/honk-install"' scripts/install.sh
+# Upgrading the LuCI package alone must upgrade honk first: the panel assets
+# moved into the honk package and the old honk needs them.
+grep -Fq 'apk add honk' luci-app-honk/root/usr/share/luci-app-honk/update-pkg.sh
+# The geo URL is https-only in both the frontend and the rpc backend.
+grep -Fq "u.protocol !== 'https:'" luci-app-honk/htdocs/luci-static/resources/view/honk/maintenance.js
+grep -Fq 'https://*)' luci-app-honk/root/usr/libexec/rpcd/honk
+
 git diff --check
 echo 'Static checks passed.'

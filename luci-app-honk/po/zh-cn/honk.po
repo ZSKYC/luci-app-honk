@@ -625,8 +625,8 @@ msgstr "保存"
 
 #: htdocs/luci-static/resources/view/honk/maintenance.js:234
 #, javascript-format
-msgid "Invalid %s: must be an http(s) URL."
-msgstr "无效的 %s：必须是 http(s) 链接。"
+msgid "Invalid %s: must be an https URL."
+msgstr "无效的 %s：必须是 https 链接。"
 
 #: htdocs/luci-static/resources/view/honk/maintenance.js:254
 msgid "Geo data source saved."

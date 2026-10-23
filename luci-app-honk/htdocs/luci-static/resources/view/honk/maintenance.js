@@ -241,9 +241,9 @@ return view.extend({
 						if (url) {
 							try {
 								const u = new URL(url);
-								if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('bad protocol');
+								if (u.protocol !== 'https:') throw new Error('bad protocol');
 							} catch (e) {
-								document.getElementById('honk-geo-msg').textContent = _('Invalid %s: must be an http(s) URL.').format(label);
+								document.getElementById('honk-geo-msg').textContent = _('Invalid %s: must be an https URL.').format(label);
 								return;
 							}
 						}

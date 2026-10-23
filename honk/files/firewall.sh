@@ -80,7 +80,7 @@ honk_firewall_apply() {
 			''|*[!A-Za-z0-9_]*) continue ;;
 			"$lan_zone"|wan) continue ;;
 		esac
-		fw_section="$HONK_FIREWALL_REJECT_PREFIX_$fw_zone"
+		fw_section="${HONK_FIREWALL_REJECT_PREFIX}_$fw_zone"
 		uci set firewall."$fw_section"='rule'
 		uci set firewall."$fw_section".name="honk-native-api-reject-$fw_zone"
 		uci set firewall."$fw_section".src="$fw_zone"
@@ -110,12 +110,34 @@ honk_firewall_current_port() {
 	uci -q get "firewall.$HONK_FIREWALL_LAN_SECTION.dest_port" 2>/dev/null
 }
 
-# Apply the rule only when the open port differs, so that a rollback does not
-# reload the firewall for nothing. Both rules are checked: the wan reject is
-# part of the same boundary.
+# Apply the rules only when the current state differs, so that a rollback does
+# not reload the firewall for nothing. The lan rule's source zone matters as
+# much as the port: settings/restore/reset can keep the same port while moving
+# the network to another firewall zone, and a port-only comparison would leave
+# the API open in the old zone and unreachable in the new one.
 honk_firewall_sync() {
 	sync_port=$(honk_firewall_port "$1") || return 1
-	[ "$(honk_firewall_current_port)" = "$sync_port" ] && \
-		[ "$(uci -q get "firewall.$HONK_FIREWALL_WAN_SECTION.dest_port" 2>/dev/null)" = "$sync_port" ] && return 0
-	honk_firewall_apply "$sync_port"
+	sync_lan_zone=$(honk_firewall_lan_zone 2>/dev/null) || sync_lan_zone=lan
+	[ -n "$sync_lan_zone" ] || sync_lan_zone=lan
+	if [ "$(honk_firewall_current_port)" != "$sync_port" ] || \
+		[ "$(uci -q get "firewall.$HONK_FIREWALL_LAN_SECTION.src" 2>/dev/null)" != "$sync_lan_zone" ] || \
+		[ "$(uci -q get "firewall.$HONK_FIREWALL_WAN_SECTION.dest_port" 2>/dev/null)" != "$sync_port" ]; then
+		honk_firewall_apply "$sync_port"
+		return $?
+	fi
+	# The reject rules for all other zones are part of the same boundary; a
+	# zone that was added after the last apply must not stay open.
+	for sync_zone in $(honk_firewall_zones); do
+		case "$sync_zone" in
+			''|*[!A-Za-z0-9_]*) continue ;;
+			"$sync_lan_zone"|wan) continue ;;
+		esac
+		sync_section="${HONK_FIREWALL_REJECT_PREFIX}_$sync_zone"
+		if [ "$(uci -q get "firewall.$sync_section.src" 2>/dev/null)" != "$sync_zone" ] || \
+			[ "$(uci -q get "firewall.$sync_section.dest_port" 2>/dev/null)" != "$sync_port" ]; then
+			honk_firewall_apply "$sync_port"
+			return $?
+		fi
+	done
+	return 0
 }

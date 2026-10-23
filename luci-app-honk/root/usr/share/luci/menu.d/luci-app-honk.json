@@ -6,7 +6,7 @@
 			"type": "firstchild"
 		},
 		"depends": {
-			"acl": [ "luci-app-honk" ]
+			"acl": [ "luci-app-honk-read" ]
 		}
 	},
 	"admin/services/honk/overview": {
@@ -31,6 +31,9 @@
 		"action": {
 			"type": "view",
 			"path": "honk/maintenance"
+		},
+		"depends": {
+			"acl": [ "luci-app-honk-admin" ]
 		}
 	},
 	"admin/services/honk/dashboard": {

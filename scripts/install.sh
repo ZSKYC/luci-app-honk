@@ -11,13 +11,16 @@ GH_RELEASE_API="https://api.github.com/repos/${REPO}/releases/tags"
 # 而且它只能保护传输，不能替代下面的签名校验。
 GH_PROXY="${GH_PROXY:-}"
 GEO_FEED="https://down.dllkids.xyz/openwrt-feed"
-TMP_DIR="/tmp/honk-install"
+# The download directory is created with mktemp after the release is chosen:
+# a fixed /tmp path could be planted as a symlink by a local user and then
+# followed by this root script.
+TMP_DIR=""
 # 设备信任的签名公钥。它随每次 release 发布，安装到 /etc/apk/keys 之后
 # apk 才会校验安装包的签名。
 APK_KEY_FILE="/etc/apk/keys/luci-app-honk.rsa.pub"
 
 cleanup() {
-	rm -rf "$TMP_DIR" 2>/dev/null || :
+	[ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR" 2>/dev/null || :
 }
 trap cleanup EXIT INT TERM
 
@@ -78,6 +81,29 @@ sums_lookup() {
 # The browser download url of the first asset whose name matches the pattern.
 asset_url() {
 	printf '%s' "$1" | grep -oE "\"browser_download_url\": *\"[^\"]*/${2}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1
+}
+
+# The sha256 digest the GitHub API recorded for an asset. The API response is
+# fetched from api.github.com, which is not proxied by GH_PROXY, so this value
+# anchors the downloaded SHA256SUMS/key to GitHub rather than to the transport
+# proxy.
+asset_digest() {
+	printf '%s\n' "$1" | awk -v want="$2" '
+		/"name": *"/ {
+			name = $0
+			sub(/.*"name": *"/, "", name)
+			sub(/".*/, "", name)
+			seen = (name == want)
+			next
+		}
+		seen && /"digest": *"sha256:[0-9a-f]+"/ {
+			digest = $0
+			sub(/.*sha256:/, "", digest)
+			sub(/".*/, "", digest)
+			print digest
+			exit
+		}
+	'
 }
 
 detect_sdk() {
@@ -204,7 +230,10 @@ main() {
 	select_release || { echo "未找到包含 $RELEASE_ARCH 安装包的正式 Release。" >&2; exit 1; }
 	echo "使用 Release $RELEASE_TAG"
 
-	mkdir -p "$TMP_DIR"
+	TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/honk-install.XXXXXX") || {
+		echo "无法创建临时目录。" >&2
+		exit 1
+	}
 	chmod 0700 "$TMP_DIR"
 	honk_file="$TMP_DIR/$(basename "$RELEASE_HONK_ASSET")"
 	luci_file="$TMP_DIR/$(basename "$RELEASE_LUCI_ASSET")"
@@ -218,6 +247,22 @@ main() {
 	echo "下载校验文件与签名公钥"
 	download_file "$(proxy_url "$RELEASE_SUMS_ASSET")" "$sums_file"
 	download_file "$(proxy_url "$RELEASE_KEY_ASSET")" "$key_file"
+
+	# 先锚定校验文件本身：摘要来自 api.github.com（不受 GH_PROXY 影响），
+	# 代理即使能替换 SHA256SUMS/公钥，也会在这里被拒。公钥摘要可用时同样校验。
+	sums_digest=$(asset_digest "$RELEASE_JSON" "SHA256SUMS")
+	[ -n "$sums_digest" ] || { echo "无法从 GitHub API 读取 SHA256SUMS 摘要，安装中止。" >&2; exit 1; }
+	verify_sha256 "$sums_file" "$sums_digest" || {
+		echo "SHA256SUMS 与 GitHub API 记录不一致（代理或下载被篡改），安装中止。" >&2
+		exit 1
+	}
+	key_digest=$(asset_digest "$RELEASE_JSON" "luci-app-honk.pub.pem")
+	if [ -n "$key_digest" ]; then
+		verify_sha256 "$key_file" "$key_digest" || {
+			echo "签名公钥与 GitHub API 记录不一致，安装中止。" >&2
+			exit 1
+		}
+	fi
 
 	# 逐包校验：下载到的文件必须与 release 公布的散列一致。
 	honk_sum="$(sums_lookup "$sums_file" "$(basename "$honk_file")")"
