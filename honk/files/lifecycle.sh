@@ -10,17 +10,43 @@ honk_lifecycle_procd_running() {
 	ubus call service list '{"name":"honk"}' 2>/dev/null | jsonfilter -e '@.honk.instances.main.running' 2>/dev/null
 }
 
-honk_lifecycle_managed_pid() {
-	hlp_pid=$(honk_lifecycle_procd_pid)
-	[ -n "$hlp_pid" ] && [ -r "/proc/$hlp_pid/cmdline" ] || return 1
-	hlp_cmd=$(tr '\000' ' ' < "/proc/$hlp_pid/cmdline" 2>/dev/null) || return 1
+# A core that was started by the init script of this package. The check is
+# about the process, not about the file on disk: a package upgrade replaces
+# the binary while the old process is still running, and the kernel then
+# reports the link target with a " (deleted)" suffix.
+honk_lifecycle_core_matches() {
+	hlp_candidate=$1
+	[ -r "/proc/$hlp_candidate/cmdline" ] || return 1
+	hlp_cmd=$(tr '\000' ' ' < "/proc/$hlp_candidate/cmdline" 2>/dev/null) || return 1
 	case "$hlp_cmd" in
 		*/usr/bin/honk-core\ --config\ /etc/honk/config.dae\ --disable-timestamp*) ;;
 		*) return 1 ;;
 	esac
 	case "$hlp_cmd" in *--mock-ebpf*) return 1 ;; esac
-	[ "$(readlink -f "/proc/$hlp_pid/exe" 2>/dev/null)" = "$HONK_LIFECYCLE_CORE" ] || return 1
-	printf '%s\n' "$hlp_pid"
+	hlp_exe=$(readlink "/proc/$hlp_candidate/exe" 2>/dev/null) || return 1
+	case "$hlp_exe" in
+		"$HONK_LIFECYCLE_CORE"|"$HONK_LIFECYCLE_CORE (deleted)") ;;
+		*) return 1 ;;
+	esac
+	return 0
+}
+
+honk_lifecycle_managed_pid() {
+	hlp_pid=$(honk_lifecycle_procd_pid)
+	if [ -n "$hlp_pid" ] && honk_lifecycle_core_matches "$hlp_pid"; then
+		printf '%s\n' "$hlp_pid"
+		return 0
+	fi
+	# The procd instance can be gone while the core is still shutting down:
+	# a start that fails replaces the instance list with an empty one and
+	# procd kills the running instance. The process table still knows it.
+	for hlp_candidate in $(pidof honk-core 2>/dev/null); do
+		if honk_lifecycle_core_matches "$hlp_candidate"; then
+			printf '%s\n' "$hlp_candidate"
+			return 0
+		fi
+	done
+	return 1
 }
 
 honk_lifecycle_starttime() {

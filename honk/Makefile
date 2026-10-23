@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
 PKG_VERSION:=2026.10.23
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 # Pinned honk-core revision (daeuniverse/honk main), cross-compiled by
 # ci/build-core.sh. The per-architecture asset/hash are filled by that script;
@@ -160,17 +160,43 @@ define Package/honk/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 . /usr/share/honk/firewall.sh
-port=$(uci -q get honk.main.listen_port)
+
+# The upgrade rewrites the configuration file, so a read may hit it while it
+# is half written. Retry before giving up on it.
+read_uci() {
+	honk_try=0
+	while [ "$honk_try" -lt 3 ]; do
+		honk_value=$$(uci -q get "$$1" 2>/dev/null) || honk_value=
+		if [ -n "$honk_value" ]; then
+			printf '%s\n' "$$honk_value"
+			return 0
+		fi
+		honk_try=$$((honk_try + 1))
+		sleep 1
+	done
+	return 1
+}
+
+port=$$(read_uci honk.main.listen_port)
 [ -n "$port" ] || port=9527
-honk_firewall_apply "$port" || exit 0
-# default_postinst starts the service, but procd's stop is asynchronous: apk
-# stops the old service right before this script runs, so the start collides
-# with the stop that is still running and the service ends up "active with no
-# instances". A restart waits for the stop to finish and brings the upgraded
-# core up. A fresh install has no PKG_UPGRADE and keeps the plain start.
+honk_firewall_apply "$port" || :
+
+# default_postinst starts the service before this script runs. That start
+# fails while the old core still holds the tun device and the listener port,
+# and procd then replaces the instance list with an empty one, which kills
+# the old instance. The service would be left "active with no instances".
+# The upgrade path therefore stops the old core, waits until it released its
+# resources and starts the new one. A fresh install has no PKG_UPGRADE and
+# keeps the plain start.
 if [ "$${PKG_UPGRADE}" = "1" ]; then
-	logger -t honk "restarting after package upgrade"
-	/etc/init.d/honk restart
+	enabled=$$(read_uci honk.main.enabled)
+	initialized=$$(read_uci honk.main.initialized)
+	if [ "$enabled" = "1" ] && [ "$initialized" = "1" ]; then
+		logger -t honk "restarting the service after the package upgrade"
+		. /usr/share/honk/lifecycle.sh
+		honk_lifecycle_stop 60 || logger -t honk "the old core did not release its resources"
+		honk_lifecycle_start 60 || logger -t honk "the upgraded core did not come up"
+	fi
 fi
 exit 0
 endef
