@@ -6,7 +6,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
 PKG_VERSION:=2026.10.23
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 # Pinned honk-core revision (daeuniverse/honk main), cross-compiled by
 # ci/build-core.sh. The per-architecture asset/hash are filled by that script;
@@ -168,17 +168,17 @@ honk_firewall_apply "$port" || :
 # fails while the old core still holds the tun device and the listener port,
 # and procd then replaces the instance list with an empty one, which kills
 # the old instance. The service would be left "active with no instances".
-# The upgrade path therefore stops the old core, waits until it released its
-# resources and starts the new one. A fresh install has no PKG_UPGRADE and
-# keeps the plain start.
+# The upgrade path therefore makes sure a core with the new binary is up:
+# a core that is already running is only waited for, one that still runs
+# the replaced binary is stopped first. A fresh install has no PKG_UPGRADE
+# and keeps the plain start.
 if [ "$${PKG_UPGRADE}" = "1" ]; then
 	enabled=$$(uci -q get honk.main.enabled 2>/dev/null)
 	initialized=$$(uci -q get honk.main.initialized 2>/dev/null)
 	if [ "$enabled" = "1" ] && [ "$initialized" = "1" ]; then
-		logger -t honk "restarting the service after the package upgrade"
+		logger -t honk "checking the service after the package upgrade"
 		. /usr/share/honk/lifecycle.sh
-		honk_lifecycle_stop 60 || logger -t honk "the old core did not release its resources"
-		honk_lifecycle_start 60 || logger -t honk "the upgraded core did not come up"
+		honk_lifecycle_ensure 60 || logger -t honk "the service did not come up after the package upgrade"
 	fi
 fi
 exit 0

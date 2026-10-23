@@ -14,8 +14,13 @@ honk_lifecycle_procd_running() {
 # about the process, not about the file on disk: a package upgrade replaces
 # the binary while the old process is still running, and the kernel then
 # reports the link target with a " (deleted)" suffix.
+#
+# The mode "current" only accepts a core that runs the binary which is on
+# disk right now. A core that was started before an upgrade still maps the
+# replaced inode and therefore runs the old code.
 honk_lifecycle_core_matches() {
 	hlp_candidate=$1
+	hlp_mode=${2:-any}
 	[ -r "/proc/$hlp_candidate/cmdline" ] || return 1
 	hlp_cmd=$(tr '\000' ' ' < "/proc/$hlp_candidate/cmdline" 2>/dev/null) || return 1
 	case "$hlp_cmd" in
@@ -25,28 +30,37 @@ honk_lifecycle_core_matches() {
 	case "$hlp_cmd" in *--mock-ebpf*) return 1 ;; esac
 	hlp_exe=$(readlink "/proc/$hlp_candidate/exe" 2>/dev/null) || return 1
 	case "$hlp_exe" in
-		"$HONK_LIFECYCLE_CORE"|"$HONK_LIFECYCLE_CORE (deleted)") ;;
+		"$HONK_LIFECYCLE_CORE") ;;
+		"$HONK_LIFECYCLE_CORE (deleted)")
+			[ "$hlp_mode" = current ] && return 1
+			;;
 		*) return 1 ;;
 	esac
 	return 0
 }
 
-honk_lifecycle_managed_pid() {
+# The pid of the core this package manages. The procd instance is the
+# authority, but it can be gone while the core is still shutting down: a
+# start that fails replaces the instance list with an empty one and procd
+# kills the running instance. The process table still knows it.
+honk_lifecycle_find_core() {
+	hlp_mode=${1:-any}
 	hlp_pid=$(honk_lifecycle_procd_pid)
-	if [ -n "$hlp_pid" ] && honk_lifecycle_core_matches "$hlp_pid"; then
+	if [ -n "$hlp_pid" ] && honk_lifecycle_core_matches "$hlp_pid" "$hlp_mode"; then
 		printf '%s\n' "$hlp_pid"
 		return 0
 	fi
-	# The procd instance can be gone while the core is still shutting down:
-	# a start that fails replaces the instance list with an empty one and
-	# procd kills the running instance. The process table still knows it.
 	for hlp_candidate in $(pidof honk-core 2>/dev/null); do
-		if honk_lifecycle_core_matches "$hlp_candidate"; then
+		if honk_lifecycle_core_matches "$hlp_candidate" "$hlp_mode"; then
 			printf '%s\n' "$hlp_candidate"
 			return 0
 		fi
 	done
 	return 1
+}
+
+honk_lifecycle_managed_pid() {
+	honk_lifecycle_find_core
 }
 
 honk_lifecycle_starttime() {
@@ -231,4 +245,53 @@ honk_lifecycle_restart() {
 		HONK_LIFECYCLE_WAS_RUNNING=0
 	fi
 	honk_lifecycle_stop "${1:-30}" && honk_lifecycle_start "${1:-30}"
+}
+
+# Bring the service up after a package upgrade.
+#
+# The start in default_postinst may already have worked. A core that is
+# still setting up its network resources must not be stopped: the teardown
+# of a core that never finished starting leaves the tun device and the
+# network namespace behind, and the next core then refuses to start
+# because dae0 is still there. So a core that already runs the binary on
+# disk is only waited for.
+#
+# A core that was started before the upgrade still maps the replaced
+# binary, so it does not count as the new one: it is stopped, and the
+# resources are waited for before the new core is started.
+honk_lifecycle_ensure() {
+	hlp_timeout=${1:-60}
+	# The core that default_postinst started may not have exec'd the binary
+	# yet when this runs, so wait for it to show up before deciding what to
+	# do. A core that is still running the replaced binary does not count:
+	# it has to be replaced.
+	hlp_wait=0
+	hlp_pid=
+	while [ "$hlp_wait" -lt 10 ]; do
+		hlp_pid=$(honk_lifecycle_find_core current 2>/dev/null)
+		[ -n "$hlp_pid" ] && break
+		if [ -z "$(pidof honk-core 2>/dev/null)" ] && [ -z "$(honk_lifecycle_procd_pid)" ]; then
+			# nothing is running at all, so there is nothing to stop
+			break
+		fi
+		sleep 1
+		hlp_wait=$((hlp_wait + 1))
+	done
+	if [ -n "$hlp_pid" ]; then
+		hlp_ok=0
+		hlp_wait=0
+		while [ "$hlp_wait" -lt "$hlp_timeout" ]; do
+			if honk_lifecycle_api_owned "$hlp_pid"; then
+				hlp_ok=$((hlp_ok + 1))
+				[ "$hlp_ok" -ge 2 ] && return 0
+			else
+				hlp_ok=0
+			fi
+			sleep 1
+			hlp_wait=$((hlp_wait + 1))
+		done
+		echo "honk lifecycle: the new core did not become ready" >&2
+		return 1
+	fi
+	honk_lifecycle_stop "$hlp_timeout" && honk_lifecycle_start "$hlp_timeout"
 }

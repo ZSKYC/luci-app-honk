@@ -239,19 +239,21 @@ grep -Fq '$(INSTALL_BIN) $(CURDIR)/files/update.sh' honk/Makefile
 grep -Fq '+@KERNEL_DEBUG_INFO_BTF' honk/Makefile
 grep -Fq '+curl' honk/Makefile
 grep -Fq '+curl' luci-app-honk/Makefile
-# The upgrade path restarts the service: default_postinst starts the service
-# while the old core still holds the tun device and the listener port. That
-# start fails, and procd then replaces the instance list with an empty one,
-# which leaves the service "active with no instances". The upgrade path
-# therefore stops the old core, waits until it released its resources and
-# starts the new one.
+# The upgrade path makes sure the service is up: default_postinst starts the
+# service while the old core still holds the tun device and the listener
+# port. That start fails, and procd then replaces the instance list with an
+# empty one, which leaves the service "active with no instances".
 grep -Fq 'PKG_UPGRADE' honk/Makefile
-grep -Fq 'honk_lifecycle_stop 60' honk/Makefile
-grep -Fq 'honk_lifecycle_start 60' honk/Makefile
+grep -Fq 'honk_lifecycle_ensure 60' honk/Makefile
 # A package upgrade replaces the binary while the old core is still running.
 # The kernel then reports the link target with a " (deleted)" suffix, so a
 # plain path comparison would not find the core any more.
 grep -Fq 'HONK_LIFECYCLE_CORE (deleted)' honk/files/lifecycle.sh
+# A core that already runs the binary on disk must not be stopped: the
+# teardown of a core that never finished starting leaks the tun device and
+# the network namespace, and the next core then refuses to start.
+grep -Fq 'honk_lifecycle_find_core current' honk/files/lifecycle.sh
+grep -Fq 'honk_lifecycle_ensure()' honk/files/lifecycle.sh
 grep -Fq "! rg -n 'MockBackend|mockBackend|mock-backend' dist" ci/build-doona.sh
 ! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh || {
 	echo 'the mock backend guard is missing from ci/build-doona.sh' >&2
