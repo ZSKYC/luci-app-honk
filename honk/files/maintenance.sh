@@ -28,6 +28,7 @@ if [ "${HONK_MAINT_LIBRARY:-0}" != 1 ]; then
 	. /usr/share/honk/lifecycle.sh || exit 1
 	. /usr/share/honk/firewall.sh || exit 1
 	. /usr/share/honk/runtime-dir.sh || exit 1
+	. /usr/share/honk/system-config.sh || exit 1
 	. /usr/share/libubox/jshn.sh || exit 1
 fi
 
@@ -610,9 +611,16 @@ validate_system_schema() {
 	expected_ip=$3
 	expected_port=$4
 	expected_initialized=$5
-	lan_iface=$(sed -n "s/^    lan_interface: '\\([^']*\\)'$/\\1/p" "$trusted_system")
+	case "$expected_device" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	# lan_interface is a list: a bare comma-separated list is the current
+	# honk syntax, individually quoted items are still accepted (with a
+	# parser warning), and a single quoted device is the old managed form.
+	lan_ifaces=$(honk_lan_interface_list "$trusted_system") || return 1
+	case " $lan_ifaces " in
+		*" $expected_device "*) ;;
+		*) return 1 ;;
+	esac
 	listen_addr=$(sed -n "s/^        listen: '\\([^']*\\)'$/\\1/p" "$trusted_system")
-	case "$lan_iface" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
 	case "$listen_addr" in ''|*[!0-9.:]*) return 1 ;; esac
 	case "$listen_addr" in *.*.*.*:*) ;; *) return 1 ;; esac
 	listen_host=${listen_addr%:*}
@@ -620,7 +628,7 @@ validate_system_schema() {
 	case "$listen_host" in ''|*[!0-9.]*) return 1 ;; esac
 	case "$listen_port" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || return 1
-	[ "$lan_iface" = "$expected_device" ] && [ "$listen_port" = "$expected_port" ] || return 1
+	[ "$listen_port" = "$expected_port" ] || return 1
 	[ "$listen_host" = "$expected_ip" ] || [ "$listen_host" = 127.0.0.1 ] || [ "$listen_host" = 0.0.0.0 ] || return 1
 	store_subscribe=$(sed -n 's/^    store_subscribe: \(true\|false\)$/\1/p' "$trusted_system")
 	case "$store_subscribe" in true|false) ;; *) return 1 ;; esac
@@ -636,7 +644,7 @@ validate_system_schema() {
 	cat > "$temp_dir/system.expected" <<EOF
 global {
     wan_interface: auto
-    lan_interface: '$lan_iface'
+    lan_interface: '$expected_device'
     log_level: info
     dial_mode: domain
     allow_insecure: false
@@ -663,7 +671,8 @@ EOF
 	# has to match the managed template exactly. Blank lines are compared out
 	# as well, because the ui line is optional.
 	normalize_system() {
-		sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*bootstrap_resolver:/d' \
+		sed -e "s/^[[:space:]]*lan_interface:.*/    lan_interface: '$expected_device'/" \
+			-e '/^[[:space:]]*#/d' -e '/^[[:space:]]*bootstrap_resolver:/d' \
 			-e '/^[[:space:]]*$/d' "$1"
 	}
 	normalize_system "$trusted_system" > "$temp_dir/system.normalized"
@@ -815,10 +824,13 @@ write_live_system() {
 	# into the system config, so a later address change cannot strand the
 	# panel on a stale address.
 	if [ "$live_initialized" = 1 ]; then live_host=0.0.0.0; else live_host=127.0.0.1; fi
+	# Keep the operator's full interface list when the current/restored file
+	# has one; only fall back to the managed device when it does not.
+	live_lan=$(honk_lan_interface_render "$live_system" "$live_device")
 	cat > "$live_system" <<EOF
 global {
     wan_interface: auto
-    lan_interface: '$live_device'
+    lan_interface: $live_lan
     log_level: info
     dial_mode: domain
     allow_insecure: false

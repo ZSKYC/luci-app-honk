@@ -98,6 +98,16 @@ config rule 'honk_native_api_wan'    src=wan  dest_port=9527  target=REJECT
 
 > 如果你更看重"套接字根本不监听 WAN"这一层，而不在意换 IP 的场景，把 `/etc/honk/system.dae` 里的 `listen: '0.0.0.0:9527'` 改成具体局域网 IP 即可，例如 `listen: '192.168.1.1:9527'`。此时 Doona 只能用这个地址访问，路由器换 IP 后需要重新初始化或系统修复。
 
+### `lan_interface` 列表语法
+
+`global.lan_interface` 是列表。官方 honk 解析器当前推荐**裸逗号分隔**（每项不加引号）：
+
+```
+lan_interface: br-lan, ipsec0, tun0
+```
+
+逐项加引号（`'br-lan', 'ipsec0'`）仍能解析，但会触发 `legacy-list-quoting` 警告；整段加引号是更旧的写法。本包的初始化/改端口/备份/修复会保留设备上已有的完整列表，不会把它压回单个 `br-lan`。
+
 内核侧还有两道与本仓库无关的防线：管理员密码用 PBKDF2-HMAC-SHA256（10 万轮）散列，会话是不透明随机令牌，内存里只留 SHA-256 摘要，12 小时过期且重启即失效。
 
 **注意**：用域名访问 Doona 时，内核在通配绑定下只接受 IP 字面量或 `localhost` 作为 Host，需要域名访问时在 `native_api` 里配 `allowed_hosts` 与 `allow_origins`，然后重启内核。

@@ -371,6 +371,7 @@ stage_honk() { # <stage-dir> <arch>
 	install -m 0755 "$ROOT/honk/files/lock.sh" "$idir/usr/share/honk/lock.sh"
 	install -m 0755 "$ROOT/honk/files/firewall.sh" "$idir/usr/share/honk/firewall.sh"
 	install -m 0755 "$ROOT/honk/files/kernel.sh" "$idir/usr/share/honk/kernel.sh"
+	install -m 0755 "$ROOT/honk/files/system-config.sh" "$idir/usr/share/honk/system-config.sh"
 	install -m 0755 "$ROOT/honk/files/lifecycle.sh" "$idir/usr/share/honk/lifecycle.sh"
 	install -m 0755 "$ROOT/honk/files/runtime-dir.sh" "$idir/usr/share/honk/runtime-dir.sh"
 	install -m 0755 "$ROOT/honk/files/maintenance.sh" "$idir/usr/share/honk/maintenance.sh"

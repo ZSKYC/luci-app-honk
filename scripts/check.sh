@@ -653,5 +653,27 @@ grep -Fq 'write_status running preparing 1 preparing' honk/files/job.sh
 grep -Fq 'write_status succeeded complete 1' honk/files/job.sh
 ! grep -Fq 'write_status running preparing true' honk/files/job.sh
 
+# lan_interface accepts a bare comma-separated list (current honk syntax),
+# individually quoted items, or one quoted device. Rewrites must keep the
+# operator's full list instead of collapsing to the managed device.
+bash <<'BASH'
+set -eu
+. honk/files/system-config.sh
+file=$(mktemp)
+printf 'global {\n    lan_interface: br-lan, ipsec0, tun0\n}\n' > "$file"
+[ "$(honk_lan_interface_list "$file")" = 'br-lan ipsec0 tun0' ]
+[ "$(honk_lan_interface_render "$file" br-lan)" = 'br-lan, ipsec0, tun0' ]
+printf 'global {\n    lan_interface: %s\n}\n' "'br-lan', 'ipsec0'" > "$file"
+[ "$(honk_lan_interface_list "$file")" = 'br-lan ipsec0' ]
+printf 'global {\n    lan_interface: %s\n}\n' "'br-lan'" > "$file"
+[ "$(honk_lan_interface_render "$file" br-lan)" = 'br-lan' ]
+[ "$(honk_lan_interface_render "$file" eth9)" = 'eth9' ]
+rm -f "$file"
+BASH
+grep -Fq 'system-config.sh' honk/Makefile
+grep -Fq 'system-config.sh' ci/build-apk.sh
+grep -Fq 'system-config.sh' honk/files/control.sh
+grep -Fq 'system-config.sh' honk/files/maintenance.sh
+
 git diff --check
 echo 'Static checks passed.'

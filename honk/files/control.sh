@@ -15,6 +15,7 @@ HONK_UI_FALLBACK=/usr/share/honk/ui
 . /usr/share/honk/lifecycle.sh
 . /usr/share/honk/firewall.sh
 . /usr/share/honk/kernel.sh
+. /usr/share/honk/system-config.sh
 
 fail() {
 	echo "honk: $*" >&2
@@ -370,8 +371,11 @@ write_runtime_system() {
 	[ "$current_hash" = "$system_written_hash" ] || { fail "system config changed concurrently; refusing runtime config write"; return 1; }
 	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
 	ui_path=$(honk_ui_path)
+	# Keep the operator's full interface list (e.g. a LAN bridge plus VPN
+	# interfaces); the honk parser accepts a bare comma-separated list.
+	lan_list=$(honk_lan_interface_render /etc/honk/system.dae "$lan_device")
 	{
-		printf "global {\n    wan_interface: auto\n    lan_interface: '%s'\n" "$lan_device"
+		printf "global {\n    wan_interface: auto\n    lan_interface: %s\n" "$lan_list"
 		printf "    log_level: info\n    dial_mode: domain\n    allow_insecure: false\n"
 		printf "    auto_config_kernel_parameter: true\n    data_dir: '/etc/honk'\n"
 		printf "    bootstrap_resolver: '127.0.0.1:53'\n"

@@ -142,6 +142,7 @@ define Package/honk/install
 	$(INSTALL_BIN) $(CURDIR)/files/runtime-dir.sh $(1)/usr/share/honk/runtime-dir.sh
 	$(INSTALL_BIN) $(CURDIR)/files/firewall.sh $(1)/usr/share/honk/firewall.sh
 	$(INSTALL_BIN) $(CURDIR)/files/kernel.sh $(1)/usr/share/honk/kernel.sh
+	$(INSTALL_BIN) $(CURDIR)/files/system-config.sh $(1)/usr/share/honk/system-config.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lifecycle.sh $(1)/usr/share/honk/lifecycle.sh
 	$(INSTALL_BIN) $(CURDIR)/files/maintenance.sh $(1)/usr/share/honk/maintenance.sh
 	$(INSTALL_BIN) $(CURDIR)/files/job.sh $(1)/usr/share/honk/job.sh
