@@ -17,14 +17,18 @@ honk_firewall_port() {
 	printf '%s\n' "$1"
 }
 
-# The firewall zone a network belongs to, empty when the zone is unknown.
+# The zone name a network belongs to, empty when the zone is unknown.
+#
+# Sections can be anonymous (`@zone[0]`) or named. Their identifier is not the
+# zone name; the name option is, and it is what a rule's `src` must reference.
 honk_firewall_network_zone() {
 	fw_network=$1
 	case "$fw_network" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
-	for fw_entry in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.=]*\)\.network='\(.*\)'$/\1 \2/p"); do
-		fw_name=${fw_entry%% *}
-		fw_net=${fw_entry#* }
-		[ "$fw_net" = "$fw_network" ] || continue
+	for fw_section in $(uci -q show firewall 2>/dev/null |
+		sed -n "s/^firewall\.\([^.=]*\)\.network=.*/\1/p" | sort -u); do
+		case "$fw_section" in ''|*[!A-Za-z0-9_@\[\]-]*) continue ;; esac
+		fw_name=$(uci -q get "firewall.$fw_section.name" 2>/dev/null) || continue
+		case "$fw_name" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
 		printf '%s\n' "$fw_name"
 		return 0
 	done
@@ -42,9 +46,16 @@ honk_firewall_lan_zone() {
 	printf '%s\n' "$fw_zone"
 }
 
-# Every zone that carries a network.
+# Every zone name, including anonymous zone sections and zones that match
+# interfaces/devices instead of networks.
 honk_firewall_zones() {
-	uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.=]*\)\.network=.*/\1/p" | sort -u
+	for fw_section in $(uci -q show firewall 2>/dev/null |
+		sed -n "s/^firewall\.\([^.=]*\)=zone$/\1/p"); do
+		case "$fw_section" in ''|*[!A-Za-z0-9_@\[\]-]*) continue ;; esac
+		fw_name=$(uci -q get "firewall.$fw_section.name" 2>/dev/null) || continue
+		case "$fw_name" in ''|*[!A-Za-z0-9_.-]*) continue ;; esac
+		printf '%s\n' "$fw_name"
+	done | sort -u
 }
 
 honk_firewall_apply() {

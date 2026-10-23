@@ -581,12 +581,24 @@ extra_src=old
 uci() {
 	case "$*" in
 		"-q get honk.main.lan_network") echo lan ;;
+		"-q get firewall.@zone[0].name") echo lan ;;
+		"-q get firewall.@zone[1].name") echo wan ;;
+		"-q get firewall.guestzone.name") echo guest ;;
 		"-q get firewall.honk_native_api_lan.dest_port") echo "$lan_port" ;;
 		"-q get firewall.honk_native_api_lan.src") echo "$lan_src" ;;
 		"-q get firewall.honk_native_api_wan.dest_port") echo "$wan_port" ;;
 		"-q get firewall.honk_native_api_reject_guest.src") echo "$extra_src" ;;
 		"-q get firewall.honk_native_api_reject_guest.dest_port") echo 9527 ;;
-		"-q show firewall") printf "firewall.lan.network='lan'\nfirewall.wan.network='wan'\nfirewall.guest.network='guest'\n" ;;
+		"-q show firewall") printf '%s\n' \
+			"firewall.@zone[0]=zone" \
+			"firewall.@zone[0].name='lan'" \
+			"firewall.@zone[0].network='lan'" \
+			"firewall.@zone[1]=zone" \
+			"firewall.@zone[1].name='wan'" \
+			"firewall.@zone[1].network='wan'" \
+			"firewall.guestzone=zone" \
+			"firewall.guestzone.name='guest'" \
+			"firewall.guestzone.network='guest'" ;;
 		*) return 1 ;;
 	esac
 }
