@@ -648,5 +648,10 @@ grep -Fq 'apk add honk' luci-app-honk/root/usr/share/luci-app-honk/update-pkg.sh
 grep -Fq "u.protocol !== 'https:'" luci-app-honk/htdocs/luci-static/resources/view/honk/maintenance.js
 grep -Fq 'https://*)' luci-app-honk/root/usr/libexec/rpcd/honk
 
+# jshn's json_add_boolean only treats 1 as true; "true" is written as false.
+grep -Fq 'write_status running preparing 1 preparing' honk/files/job.sh
+grep -Fq 'write_status succeeded complete 1' honk/files/job.sh
+! grep -Fq 'write_status running preparing true' honk/files/job.sh
+
 git diff --check
 echo 'Static checks passed.'

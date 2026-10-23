@@ -65,7 +65,7 @@ job_dir=$JOBS/$job_id
 [ -d "$JOBS" ] && [ ! -L "$JOBS" ] && [ -d "$job_dir" ] && [ ! -L "$job_dir" ] || exit 2
 [ "$(stat -c '%u:%a' "$JOBS" 2>/dev/null)" = 0:700 ] && [ "$(stat -c '%u:%a' "$job_dir" 2>/dev/null)" = 0:700 ] || exit 2
 [ "$(id -u)" = 0 ] || exit 2
-write_status running preparing true preparing || exit 1
+write_status running preparing 1 preparing || exit 1
 : > "$job_dir/output" || exit 1
 chmod 0600 "$job_dir/output" || exit 1
 if [ "$operation" = update_apply ]; then
@@ -125,7 +125,7 @@ while kill -0 "$maint_pid" 2>/dev/null; do
 		committed) status_phase=committing ;;
 		*) status_phase=preparing ;;
 	esac; fi
-	write_status running "$status_phase" true "$status_phase" || :
+	write_status running "$status_phase" 1 "$status_phase" || :
 	sleep 1
 done
 wait "$maint_pid"
@@ -156,7 +156,7 @@ if [ "$operation_rc" -eq 0 ] && [ "$operation_ok" = 1 ]; then
 		logger -t honk-maintenance "$operation completed" 2>/dev/null || :
 		exit 0
 	fi
-	write_status succeeded complete true "$operation_message"
+	write_status succeeded complete 1 "$operation_message"
 	logger -t honk-maintenance "$operation completed" 2>/dev/null || :
 	exit 0
 fi
