@@ -384,6 +384,9 @@ jobs:
 
           pins = assignments('ci/pins.env', '=')
           core = assignments('honk/Makefile', ':=')
+          # The Doona archive and its hash are declared with ?= in the
+          # Makefile, so a staged run can override them.
+          core.update(assignments('honk/Makefile', '?='))
           luci = assignments('luci-app-honk/Makefile', ':=')
           source = assignments('source-meta/generated-stage.mk', ':=')
           packages = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()

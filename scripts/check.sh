@@ -461,6 +461,10 @@ grep -Fq 'packages.adb' .github/workflows/release.yml
 grep -Fq 'luci-app-honk.pub.pem' .github/workflows/release.yml
 grep -Fq 'OPENWRT_RELEASE' .github/workflows/release.yml
 grep -Fq 'OPENWRT_RELEASE' ci/pins.env
+# The release manifest records the Doona archive hash. It is declared with ?=
+# in the Makefile, so the parser has to read that form as well.
+grep -Fq "core.update(assignments('honk/Makefile', '?='))" .github/workflows/release.yml
+grep -Fq "core['DOONA_HASH']" .github/workflows/release.yml
 
 # The R2 credentials are read from a file outside the repository. The helper
 # must never read them from the tree, and the tree must not carry one.
