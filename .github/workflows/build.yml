@@ -118,8 +118,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .cache/apk-dl honk
-          core=$(ls smoke-artifacts/honk-core-x86_64/artifacts/cache/honk-core-*.tar.gz | head -1)
-          doona=$(ls smoke-artifacts/honk-source-build/artifacts/cache/doona-*.tar.gz | head -1)
+          # upload-artifact stores the files relative to the root of the
+          # matched paths, so the archive can sit at the top of the artifact
+          # or below its original directory. find() does not care.
+          core=$(find smoke-artifacts/honk-core-x86_64 -name 'honk-core-*.tar.gz' | head -1)
+          doona=$(find smoke-artifacts/honk-source-build -name 'doona-*.tar.gz' | head -1)
+          test -n "$core" && test -n "$doona"
           cp "$core" "$doona" .cache/apk-dl/
           {
             echo '# local smoke manifest'
@@ -198,7 +202,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p core
-          tar --strip-components=1 -xzf "$(ls core-artifact/artifacts/cache/honk-core-*.tar.gz | head -1)" -C core
+          # The archive can sit at the top of the artifact or below its
+          # original directory; find() does not care.
+          core=$(find core-artifact -name 'honk-core-*.tar.gz' | head -1)
+          test -n "$core"
+          tar --strip-components=1 -xzf "$core" -C core
           test -x core/honk-core
       - name: Smoke the native API and the CLI
         run: ci/smoke-native-api.sh "$PWD/core/honk-core"
