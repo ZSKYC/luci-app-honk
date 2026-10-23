@@ -6,12 +6,12 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
 PKG_VERSION:=2026.10.23
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 # Pinned honk-core revision (daeuniverse/honk main), cross-compiled by
 # ci/build-core.sh. The per-architecture asset/hash are filled by that script;
 # keep a committed fallback so the feed still evaluates without a staging run.
-CORE_COMMIT:=67ee6c8db54e7da2c00b41bb809f9f0fc97e0648
+CORE_COMMIT:=2e73b9f493f2ba01c2f5b0c547dc7a7df7a4b239
 
 -include $(CURDIR)/generated-stage.mk
 
