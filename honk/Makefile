@@ -160,24 +160,7 @@ define Package/honk/postinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 . /usr/share/honk/firewall.sh
-
-# The upgrade rewrites the configuration file, so a read may hit it while it
-# is half written. Retry before giving up on it.
-read_uci() {
-	honk_try=0
-	while [ "$honk_try" -lt 3 ]; do
-		honk_value=$$(uci -q get "$$1" 2>/dev/null) || honk_value=
-		if [ -n "$honk_value" ]; then
-			printf '%s\n' "$$honk_value"
-			return 0
-		fi
-		honk_try=$$((honk_try + 1))
-		sleep 1
-	done
-	return 1
-}
-
-port=$$(read_uci honk.main.listen_port)
+port=$$(uci -q get honk.main.listen_port 2>/dev/null)
 [ -n "$port" ] || port=9527
 honk_firewall_apply "$port" || :
 
@@ -189,8 +172,8 @@ honk_firewall_apply "$port" || :
 # resources and starts the new one. A fresh install has no PKG_UPGRADE and
 # keeps the plain start.
 if [ "$${PKG_UPGRADE}" = "1" ]; then
-	enabled=$$(read_uci honk.main.enabled)
-	initialized=$$(read_uci honk.main.initialized)
+	enabled=$$(uci -q get honk.main.enabled 2>/dev/null)
+	initialized=$$(uci -q get honk.main.initialized 2>/dev/null)
 	if [ "$enabled" = "1" ] && [ "$initialized" = "1" ]; then
 		logger -t honk "restarting the service after the package upgrade"
 		. /usr/share/honk/lifecycle.sh
