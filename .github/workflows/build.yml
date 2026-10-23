@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '24'
       - name: Install build tools
@@ -29,12 +29,12 @@ jobs:
         run: ci/build-doona.sh
       - name: Verify pinned Doona archive hash
         run: bash scripts/check.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: honk-source-build
           path: |
             artifacts/cache/*.tar.gz
-            luci-app-honk/generated-doona-stage.mk
+            honk/generated-doona-stage.mk
           if-no-files-found: error
           retention-days: 7
 
@@ -43,11 +43,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
       # mlugg/setup-zig still targets the Node 20 runtime upstream and has no
       # Node 24 release, so install Zig from the official tarball instead.
       # The whole distribution directory has to go on PATH, not just the
@@ -73,9 +73,132 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep zstd
       - name: Build honk-core (x86_64)
         run: CORE_ARCHS=x86_64 ci/build-core.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: honk-core-x86_64
           path: artifacts/cache/honk-core-*.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+  # The packaging defects that only surface at `apk add` time on the device
+  # (a comma-joined depends blob, files owned by the build user, a version
+  # without the release suffix) used to be found by the release pipeline. This
+  # job runs the very same packer with a throwaway signing key, so a pull
+  # request cannot break the packaging without anyone noticing until the next
+  # release.
+  package-smoke:
+    name: Package smoke (apk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [source-build, core-build]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y openssl
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          path: smoke-artifacts
+      - name: Install apk-tools
+        run: ci/install-apk-tools.sh
+      - name: Build po2lmo
+        run: ci/build-po2lmo.sh
+      - name: Generate a throwaway signing key
+        id: key
+        run: |
+          set -euo pipefail
+          # The key never leaves the runner: it is generated here, used for the
+          # smoke packages and thrown away with the job.
+          openssl ecparam -name prime256v1 -genkey -noout -out /tmp/honk-smoke-key.pem
+          echo 'key<<SMOKE_KEY_EOF' >> "$GITHUB_OUTPUT"
+          cat /tmp/honk-smoke-key.pem >> "$GITHUB_OUTPUT"
+          echo 'SMOKE_KEY_EOF' >> "$GITHUB_OUTPUT"
+      - name: Assemble the stage manifests
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/apk-dl honk
+          core=$(ls smoke-artifacts/honk-core-x86_64/artifacts/cache/honk-core-*.tar.gz | head -1)
+          doona=$(ls smoke-artifacts/honk-source-build/artifacts/cache/doona-*.tar.gz | head -1)
+          cp "$core" "$doona" .cache/apk-dl/
+          {
+            echo '# local smoke manifest'
+            echo 'PKG_SOURCE_URL:=https://example.invalid/'
+            echo "HONK_ASSET_X86_64:=$(basename "$core")"
+            echo "HONK_HASH_X86_64:=$(sha256sum "$core" | cut -d' ' -f1)"
+          } > honk/generated-stage.mk
+          {
+            echo '# local smoke manifest'
+            echo "DOONA_ARCHIVE:=$(basename "$doona")"
+            echo 'DOONA_SOURCE_URL:=https://example.invalid/'
+            echo "DOONA_HASH:=$(sha256sum "$doona" | cut -d' ' -f1)"
+          } > honk/generated-doona-stage.mk
+      - name: Build the packages
+        env:
+          APK_PRIVATE_KEY: ${{ steps.key.outputs.key }}
+          HONK_SOURCE_TAG: source-smoke
+        run: |
+          set -euo pipefail
+          # One architecture is enough: the packer loops the list itself, and
+          # the other five differ only in the core binary they carry.
+          export OPENWRT_ARCHS=x86_64
+          APK_SCRATCH="$PWD/smoke-scratch" ci/build-apk.sh
+      - name: Assert the packaged metadata and layout
+        run: |
+          set -euo pipefail
+          honk_pkg=$(ls artifacts/apk/x86_64/honk-*.apk | head -1)
+          luci_pkg=$(ls artifacts/apk/luci-app-honk-*.apk | head -1)
+          mkdir -p /tmp/apk-keys
+          cp artifacts/apk/luci-app-honk.pub.pem /tmp/apk-keys/luci-app-honk.rsa.pub
+          honk_dump=$(apk --keys-dir /tmp/apk-keys adbdump "$honk_pkg")
+          luci_dump=$(apk --keys-dir /tmp/apk-keys adbdump "$luci_pkg")
+          grep -qx '  name: honk' <<<"$honk_dump"
+          grep -qx '  arch: x86_64' <<<"$honk_dump"
+          grep -qx '  name: luci-app-honk' <<<"$luci_dump"
+          grep -qx '  arch: noarch' <<<"$luci_dump"
+          # The packages are signed with the throwaway key, and the key is the
+          # one the packer published: an unsigned or wrongly signed package
+          # would not verify here.
+          grep -q ': OK' <<<"$honk_dump"
+          grep -q ': OK' <<<"$luci_dump"
+          # The panel assets travel with the core package; the LuCI package
+          # only holds the web interface.
+          test -x smoke-scratch/honk-x86_64/usr/bin/honk-core
+          test -f smoke-scratch/honk-x86_64/usr/share/doona/index.html
+          test -f smoke-scratch/honk-x86_64/usr/share/honk/ui/index.html
+          test -f smoke-scratch/honk-x86_64/usr/share/honk/kernel.sh
+          test ! -e smoke-scratch/luci/usr/share/doona
+          test -f smoke-scratch/luci/www/luci-static/resources/view/honk/overview.js
+          test -f smoke-scratch/luci/usr/share/rpcd/acl.d/luci-app-honk-admin.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: honk-package-smoke
+          path: artifacts/apk
+          if-no-files-found: error
+          retention-days: 7
+
+  # "It compiles" does not prove that the panel can still talk to the core:
+  # the upstream move from the fork to daeuniverse/honk changed the native API
+  # and the CLI, and the mismatch was found by hand. This runs the built core
+  # against the endpoints the panel uses.
+  native-api-smoke:
+    name: Native API and CLI smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [core-build]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: honk-core-x86_64
+          path: core-artifact
+      - name: Extract the core binary
+        run: |
+          set -euo pipefail
+          mkdir -p core
+          tar --strip-components=1 -xzf "$(ls core-artifact/artifacts/cache/honk-core-*.tar.gz | head -1)" -C core
+          test -x core/honk-core
+      - name: Smoke the native API and the CLI
+        run: ci/smoke-native-api.sh "$PWD/core/honk-core"

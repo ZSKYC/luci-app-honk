@@ -8,8 +8,9 @@
 'require view';
 'require view.honk.rpc as honk';
 
-const BACKUP_PATH = '/tmp/honk-backup.tar.gz';
-const RESTORE_PATH = '/tmp/honk-maintenance/restore.tar.gz';
+const BACKUP_PATH = '/tmp/honk-runtime/backup.tar.gz';
+const RESTORE_PATH = '/tmp/honk-runtime/restore.tar.gz';
+const RUNTIME_DIR = '/tmp/honk-runtime/';
 const PKG_INFO = '/usr/share/luci-app-honk/pkg-info.sh';
 const UPDATE_PKG = '/usr/share/luci-app-honk/update-pkg.sh';
 const REFRESH_INDEX = '/usr/share/luci-app-honk/refresh-index.sh';
@@ -125,14 +126,20 @@ return view.extend({
 		/* --- Geo data card --- */
 		const dataSection = E('section', { 'class': 'honk-card' });
 		const dataBody = E('div', { 'id': 'honk-geo' }, E('em', {}, _('Probing…')));
+		// The rows are rebuilt by the background poll, so a button that was
+		// disabled when the job started comes back enabled. Track the running
+		// job per target instead of per button element.
+		const geoBusy = {};
 
 		function updateGeo(kind, btn) {
+			if (geoBusy[kind]) return;
 			const orig = btn.textContent;
+			geoBusy[kind] = true;
 			btn.disabled = true;
 			btn.textContent = '…';
 			let tries = 0;
 			const pollLog = function() {
-				return fs.read_direct('/tmp/luci-app-honk.' + kind + '.log', 'text').then(function(c) {
+				return fs.read_direct(RUNTIME_DIR + kind + '.log', 'text').then(function(c) {
 					if (c) {
 						updateLog.textContent = c;
 						updateLog.hidden = false;
@@ -145,6 +152,7 @@ return view.extend({
 			return fs.exec(UPDATE_GEO, [ kind ]).then(function(res) {
 				if (res.code === 0) return pollLog();
 			}).catch(function() {}).finally(function() {
+				delete geoBusy[kind];
 				btn.disabled = false;
 				btn.textContent = orig;
 			});
@@ -160,6 +168,10 @@ return view.extend({
 				].forEach(function(entry) {
 					const btn = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button' }, _('Update'));
 					btn.addEventListener('click', function(ev) { ev.preventDefault(); updateGeo(entry.k, btn); });
+					if (geoBusy[entry.k]) {
+						btn.disabled = true;
+						btn.textContent = '…';
+					}
 					const meta = entry.r.exists
 						? fmtBytes(entry.r.size) + (entry.r.mtime ? ' · ' + fmtMtime(entry.r.mtime) : '')
 						: _('missing — click Update to fetch');
@@ -237,17 +249,13 @@ return view.extend({
 						}
 					}
 				}
-				uci.set('honk', 'main', 'geoip_url', gi);
-				uci.set('honk', 'main', 'geosite_url', gs);
-				uci.set('honk', 'main', 'geo_auto', geoAuto ? '1' : '0');
-				uci.set('honk', 'main', 'geo_auto_freq', geoFreq);
 				const orig = saveBtn.textContent;
 				saveBtn.disabled = true; saveBtn.textContent = '…';
-				uci.save().then(function() {
-					return uci.changes();
-				}).then(function(changes) {
-					if (changes && Object.keys(changes).length)
-						return uci.apply();
+				honk.setGeo({
+					geoip_url: gi,
+					geosite_url: gs,
+					geo_auto: geoAuto ? '1' : '0',
+					geo_auto_freq: geoFreq
 				}).then(function() {
 					return fs.exec(GEO_CRON, [ geoAuto ? 'enable' : 'disable' ]);
 				}).then(function() {
@@ -282,6 +290,8 @@ return view.extend({
 		/* --- Software package updates card --- */
 		const updateSection = E('section', { 'class': 'honk-card' });
 		const pkgBody = E('div', { 'id': 'honk-pkg' }, E('em', {}, _('Probing…')));
+		// Same reason as geoBusy: the rows are rebuilt while a job runs.
+		const pkgBusy = {};
 
 		function probePkg(pkg) {
 			return fs.exec(PKG_INFO, [ pkg ]).then(function(res) {
@@ -293,12 +303,14 @@ return view.extend({
 		}
 
 		function upgradePkg(pkg, btn) {
+			if (pkgBusy[pkg]) return;
 			const orig = btn.textContent;
+			pkgBusy[pkg] = true;
 			btn.disabled = true;
 			btn.textContent = '…';
 			let tries = 0;
 			const pollLog = function() {
-				return fs.read_direct('/tmp/luci-app-honk.pkg-' + pkg + '.log', 'text').then(function(c) {
+				return fs.read_direct(RUNTIME_DIR + 'pkg-' + pkg + '.log', 'text').then(function(c) {
 					if (c) {
 						updateLog.textContent = c;
 						updateLog.hidden = false;
@@ -311,6 +323,7 @@ return view.extend({
 			return fs.exec(UPDATE_PKG, [ pkg ]).then(function(res) {
 				if (res.code === 0) return pollLog();
 			}).catch(function() {}).finally(function() {
+				delete pkgBusy[pkg];
 				btn.disabled = false;
 				btn.textContent = orig;
 			});
@@ -340,6 +353,10 @@ return view.extend({
 					} else {
 						meta = _('installed') + ': ' + r.installed + ' · ' + _('up to date');
 						btn.disabled = true;
+					}
+					if (pkgBusy[pkg]) {
+						btn.disabled = true;
+						btn.textContent = '…';
 					}
 					pkgBody.appendChild(mkPkgRow(
 						updatable ? '↑' : (r.installed ? '✓' : '✗'),
@@ -488,7 +505,14 @@ return view.extend({
 			repair.disabled = true;
 			repairMessage.textContent = _('Repairing…');
 			honk.repair().then(honk.ensureOk).then(function(result) {
-				repairMessage.textContent = honk.resultMessage(result, _('Repair completed.'));
+				var text = honk.resultMessage(result, _('Repair completed.'));
+				// A repair cannot fix a kernel without the function tracer, so
+				// the reason travels with the result instead of being lost.
+				if (result && result.warning) {
+					var warning = honk.statusIssue(result.warning);
+					if (warning) text += ' ' + warning;
+				}
+				repairMessage.textContent = text;
 			}).catch(function(error) {
 				if (error && error.recoveryRequired)
 					blockWrites();

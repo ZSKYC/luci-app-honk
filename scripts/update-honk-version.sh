@@ -26,14 +26,37 @@ if [ "$core_new" = "$CORE_COMMIT" ]; then
 fi
 
 version="$(TZ=Asia/Shanghai date +%Y.%m.%d)"
+current_version="$(sed -n 's/^PKG_VERSION:=//p' "$REPO_DIR/honk/Makefile")"
+current_release="$(sed -n 's/^PKG_RELEASE:=//p' "$REPO_DIR/honk/Makefile")"
+
+# The package version carries the build date. A second build on the same day
+# needs a new release number, otherwise apk compares the version strings and
+# sees no upgrade at all.
+if [ "$current_version" = "$version" ]; then
+	release=$((current_release + 1))
+else
+	release=1
+fi
+
+# A portable in place edit: GNU sed and BSD sed take different arguments for
+# -i, and the author develops on macOS.
+replace_line() {
+	file=$1
+	expression=$2
+	tmp="$(mktemp "${TMPDIR:-/tmp}/honk-version.XXXXXX")"
+	sed "$expression" "$file" > "$tmp"
+	mv "$tmp" "$file"
+}
 
 echo "Advancing core pin:"
 echo "  $(printf '%s' "$CORE_COMMIT" | cut -c1-7) -> $(printf '%s' "$core_new" | cut -c1-7)"
 echo "  PKG_VERSION -> $version"
+echo "  PKG_RELEASE -> $release"
 
-sed -i "s|^CORE_COMMIT=.*|CORE_COMMIT=$core_new|" "$REPO_DIR/ci/pins.env"
-sed -i "s|^CORE_COMMIT:=.*|CORE_COMMIT:=$core_new|" "$REPO_DIR/honk/Makefile"
-sed -i "s|^PKG_VERSION:=.*|PKG_VERSION:=$version|" "$REPO_DIR/honk/Makefile"
-sed -i "s|^PKG_RELEASE:=.*|PKG_RELEASE:=1|" "$REPO_DIR/honk/Makefile"
+replace_line "$REPO_DIR/ci/pins.env" "s|^CORE_COMMIT=.*|CORE_COMMIT=$core_new|"
+replace_line "$REPO_DIR/ci/pins.env" "s|^CORE_RELEASE=.*|CORE_RELEASE=$core_new|"
+replace_line "$REPO_DIR/honk/Makefile" "s|^CORE_COMMIT:=.*|CORE_COMMIT:=$core_new|"
+replace_line "$REPO_DIR/honk/Makefile" "s|^PKG_VERSION:=.*|PKG_VERSION:=$version|"
+replace_line "$REPO_DIR/honk/Makefile" "s|^PKG_RELEASE:=.*|PKG_RELEASE:=$release|"
 
 echo "Done. Run the release workflow to build the multi-arch tarballs and publish."

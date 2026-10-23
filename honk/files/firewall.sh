@@ -7,6 +7,7 @@
 
 HONK_FIREWALL_LAN_SECTION=honk_native_api_lan
 HONK_FIREWALL_WAN_SECTION=honk_native_api_wan
+HONK_FIREWALL_REJECT_PREFIX=honk_native_api_reject
 
 honk_firewall_port() {
 	case "$1" in
@@ -16,16 +17,51 @@ honk_firewall_port() {
 	printf '%s\n' "$1"
 }
 
+# The firewall zone a network belongs to, empty when the zone is unknown.
+honk_firewall_network_zone() {
+	fw_network=$1
+	case "$fw_network" in ''|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+	for fw_entry in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.=]*\)\.network='\(.*\)'$/\1 \2/p"); do
+		fw_name=${fw_entry%% *}
+		fw_net=${fw_entry#* }
+		[ "$fw_net" = "$fw_network" ] || continue
+		printf '%s\n' "$fw_name"
+		return 0
+	done
+	return 1
+}
+
+# The zone the management api may be reached in: the zone of the configured
+# lan network. A lan network that lives in the wan zone keeps the default
+# zone, because the api is never reachable from the wan.
+honk_firewall_lan_zone() {
+	fw_lan_network=$(uci -q get honk.main.lan_network 2>/dev/null)
+	case "$fw_lan_network" in ''|*[!A-Za-z0-9_.-]*) fw_lan_network=lan ;; esac
+	fw_zone=$(honk_firewall_network_zone "$fw_lan_network" 2>/dev/null) || fw_zone=
+	[ -n "$fw_zone" ] && [ "$fw_zone" != wan ] || fw_zone=lan
+	printf '%s\n' "$fw_zone"
+}
+
+# Every zone that carries a network.
+honk_firewall_zones() {
+	uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.=]*\)\.network=.*/\1/p" | sort -u
+}
+
 honk_firewall_apply() {
 	port=$(honk_firewall_port "$1") || return 1
 	command -v uci >/dev/null 2>&1 || return 1
 
-	uci -q delete firewall."$HONK_FIREWALL_LAN_SECTION" >/dev/null 2>&1
-	uci -q delete firewall."$HONK_FIREWALL_WAN_SECTION" >/dev/null 2>&1
+	# Remove the rules of an earlier run, including the ones for zones that
+	# do not exist any more.
+	for fw_section in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(honk_native_api[a-z0-9_]*\)=.*/\1/p"); do
+		uci -q delete "firewall.$fw_section" >/dev/null 2>&1
+	done
+
+	lan_zone=$(honk_firewall_lan_zone)
 
 	uci set firewall."$HONK_FIREWALL_LAN_SECTION"='rule'
 	uci set firewall."$HONK_FIREWALL_LAN_SECTION".name='honk-native-api'
-	uci set firewall."$HONK_FIREWALL_LAN_SECTION".src='lan'
+	uci set firewall."$HONK_FIREWALL_LAN_SECTION".src="$lan_zone"
 	uci set firewall."$HONK_FIREWALL_LAN_SECTION".proto='tcp'
 	uci set firewall."$HONK_FIREWALL_LAN_SECTION".dest_port="$port"
 	uci set firewall."$HONK_FIREWALL_LAN_SECTION".target='ACCEPT'
@@ -37,6 +73,22 @@ honk_firewall_apply() {
 	uci set firewall."$HONK_FIREWALL_WAN_SECTION".dest_port="$port"
 	uci set firewall."$HONK_FIREWALL_WAN_SECTION".target='REJECT'
 
+	# Every other zone rejects the port as well: the api belongs to the lan
+	# only, not to whatever zone an operator happens to add.
+	for fw_zone in $(honk_firewall_zones); do
+		case "$fw_zone" in
+			''|*[!A-Za-z0-9_]*) continue ;;
+			"$lan_zone"|wan) continue ;;
+		esac
+		fw_section="$HONK_FIREWALL_REJECT_PREFIX_$fw_zone"
+		uci set firewall."$fw_section"='rule'
+		uci set firewall."$fw_section".name="honk-native-api-reject-$fw_zone"
+		uci set firewall."$fw_section".src="$fw_zone"
+		uci set firewall."$fw_section".proto='tcp'
+		uci set firewall."$fw_section".dest_port="$port"
+		uci set firewall."$fw_section".target='REJECT'
+	done
+
 	uci commit firewall || return 1
 	/etc/init.d/firewall reload >/dev/null 2>&1 || :
 	return 0
@@ -44,8 +96,9 @@ honk_firewall_apply() {
 
 honk_firewall_remove() {
 	command -v uci >/dev/null 2>&1 || return 0
-	uci -q delete firewall."$HONK_FIREWALL_LAN_SECTION" >/dev/null 2>&1
-	uci -q delete firewall."$HONK_FIREWALL_WAN_SECTION" >/dev/null 2>&1
+	for fw_section in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(honk_native_api[a-z0-9_]*\)=.*/\1/p"); do
+		uci -q delete "firewall.$fw_section" >/dev/null 2>&1
+	done
 	uci commit firewall || return 1
 	/etc/init.d/firewall reload >/dev/null 2>&1 || :
 	return 0

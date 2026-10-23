@@ -5,6 +5,8 @@
 . /lib/functions/network.sh
 . /usr/share/honk/lock.sh
 . /usr/share/honk/lifecycle.sh
+. /usr/share/honk/runtime-dir.sh
+. /usr/share/honk/kernel.sh
 . /usr/share/honk/log-lines.sh
 
 CONTROL=/usr/share/honk/control.sh
@@ -15,7 +17,7 @@ UPDATE=/usr/share/honk/update.sh
 MAINT=/usr/share/honk/maintenance.sh
 REDACT=/usr/share/honk/redact-log.sh
 LOG_LEVEL_FILTER=/usr/share/honk/log-level-filter.sh
-RESTORE_ROOT=/tmp/honk-maintenance
+RESTORE_ROOT=/tmp/honk-runtime
 RESTORE_PATH=$RESTORE_ROOT/restore.tar.gz
 
 emit_result() {
@@ -53,11 +55,20 @@ lan_address() {
 	[ -n "$network" ] || return 1
 	network_get_device device "$network" 2>/dev/null || return 1
 	[ -n "$device" ] || return 1
-	network_get_ipaddr address "$network" 2>/dev/null || return 1
-	[ -n "$address" ] || return 1
+	network_get_ipaddr address "$network" 2>/dev/null || address=
 	case "$address" in
-		*[!0-9.]*) return 1 ;;
+		''|*[!0-9.]*) address= ;;
 	esac
+	if [ -z "$address" ]; then
+		# An IPv6 only lan has no IPv4 address; the panel is reached over
+		# IPv6 then.
+		network_get_ipaddr6 address "$network" 2>/dev/null || address=
+		case "$address" in
+			''|*[!0-9A-Fa-f:]*) address= ;;
+			*) address="[$address]" ;;
+		esac
+	fi
+	[ -n "$address" ] || return 1
 	printf '%s\n' "$address"
 }
 
@@ -85,12 +96,18 @@ status() {
 	[ -n "$core_version" ] || core_version=unknown
 	doona_version=$(sed -n 's/^Version: //p' /usr/share/doona/SOURCE 2>/dev/null | head -n 1)
 	[ -n "$doona_version" ] || doona_version=unknown
+	# The panel assets are optional: without them the core serves the fallback
+	# page, so the service runs but the panel is not usable.
+	if [ -r /usr/share/doona/index.html ]; then panel_available=1; else panel_available=0; fi
 	kernel=$(uname -r)
 	errors=""
 	if [ "$enabled" != 1 ]; then errors="$errors disabled"; fi
 	if [ "$initialized" != 1 ]; then errors="$errors not_initialized"; fi
 	if [ "$enabled" = 1 ] && [ "$initialized" = 1 ] && [ "$running" != 1 ]; then errors="$errors service_not_running"; fi
 	if [ "$running" = 1 ] && [ "$api_ready" != 1 ]; then errors="$errors api_unavailable"; fi
+	# The core proxies TCP without the kernel function tracer but cannot hook
+	# the UDP receive path, so UDP and QUIC traffic stays unproxied.
+	honk_kernel_tracer_available || errors="$errors udp_trace_unavailable"
 	if [ -d "$HONK_LOCK_DIR" ]; then
 		if lock_owner_invalid || honk_lock_is_stale; then errors="$errors stale_operation_lock maintenance_recovery_required"; else errors="$errors operation_in_progress"; fi
 	fi
@@ -105,6 +122,7 @@ status() {
 	json_add_string api_url "$api_url"
 	json_add_string core_version "$core_version"
 	json_add_string doona_version "$doona_version"
+	json_add_boolean panel_available "$panel_available"
 	json_add_string kernel "$kernel"
 	json_add_string lan_network "$lan_network"
 	case "$listen_port" in
@@ -258,6 +276,39 @@ set_enabled() {
 	uci set "honk.main.enabled=$1" && uci commit honk
 }
 
+valid_geo_url() {
+	case "$1" in
+		'') return 0 ;;
+		https://*) ;;
+		*) return 1 ;;
+	esac
+	# Only the characters a https URL may contain; the value ends up in a
+	# shell word and in a curl argument.
+	printf '%s' "$1" | grep -Eq '^https://[A-Za-z0-9._~:/?#@!$&=()*+,;=%-]+$' || return 1
+	return 0
+}
+
+# Write the geo data source settings. The panel used to write them through
+# the generic uci interface, which also allowed every other field of the
+# package to be changed; this method only touches the four geo fields.
+set_geo() {
+	request=$(cat)
+	json_load "$request" 2>/dev/null || { emit_result false invalid_request; return 1; }
+	json_get_var geoip_url geoip_url
+	json_get_var geosite_url geosite_url
+	json_get_var geo_auto geo_auto
+	json_get_var geo_auto_freq geo_auto_freq
+	valid_geo_url "$geoip_url" && valid_geo_url "$geosite_url" || { emit_result false invalid_geo_url; return 1; }
+	case "$geo_auto" in 0|1) ;; *) emit_result false invalid_geo_auto; return 1 ;; esac
+	case "$geo_auto_freq" in daily|weekly) ;; *) emit_result false invalid_geo_auto_freq; return 1 ;; esac
+	uci set "honk.main.geoip_url=$geoip_url" &&
+		uci set "honk.main.geosite_url=$geosite_url" &&
+		uci set "honk.main.geo_auto=$geo_auto" &&
+		uci set "honk.main.geo_auto_freq=$geo_auto_freq" &&
+		uci commit honk || { emit_result false settings_write_failed; return 1; }
+	emit_result true geo_settings_saved
+}
+
 procd_core_pid() {
 	honk_lifecycle_procd_pid
 }
@@ -274,18 +325,16 @@ begin_mutation() {
 
 restore_prepare() {
 	# Stage the upload directory for a backup restore. The frontend calls
-	# this before uploading the archive to $RESTORE_PATH.
-	if ! mkdir -p "$RESTORE_ROOT" 2>/dev/null; then
-		emit_result false mkdir_failed
-		return 1
-	fi
-	rm -f "$RESTORE_PATH"
+	# this before uploading the archive to $RESTORE_PATH. The directory is
+	# private to root, so the upload cannot be replaced by another user.
+	honk_runtime_dir || { emit_result false upload_unavailable; return 1; }
+	rm -f "$RESTORE_PATH" || { emit_result false upload_unavailable; return 1; }
 	emit_result true prepared
 }
 
 case "$1" in
 list)
-		echo '{"status":{},"check":{},"initialize":{"username":"String","password":"String"},"start":{},"stop":{},"restart":{},"settings":{"lan_network":"String","listen_port":"Integer","boot_enabled":"Boolean"},"repair":{},"backup":{},"restore":{},"restore_prepare":{},"reset":{},"job_status":{"job_id":"String"},"logs":{"source":"String","level":"String","limit":"Integer"},"update_check":{},"update_apply":{}}'
+		echo '{"status":{},"check":{},"initialize":{"username":"String","password":"String"},"start":{},"stop":{},"restart":{},"settings":{"lan_network":"String","listen_port":"Integer","boot_enabled":"Boolean"},"repair":{},"backup":{},"restore":{},"restore_prepare":{},"reset":{},"job_status":{"job_id":"String"},"logs":{"source":"String","level":"String","limit":"Integer"},"update_check":{},"update_apply":{},"set_geo":{"geoip_url":"String","geosite_url":"String","geo_auto":"Boolean","geo_auto_freq":"String"}}'
 		;;
 	call)
 		case "$2" in
@@ -327,6 +376,9 @@ list)
 				;;
 			update_apply)
 				start_job update_apply
+				;;
+			set_geo)
+				set_geo
 				;;
 			start)
 				begin_mutation

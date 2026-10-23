@@ -38,10 +38,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '24'
       - name: Install build tools
@@ -52,12 +52,12 @@ jobs:
         run: ci/build-doona.sh
       - name: Verify pinned Doona archive hash
         run: bash scripts/check.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: doona-source
           path: |
             artifacts/cache/doona-*.tar.gz
-            luci-app-honk/generated-doona-stage.mk
+            honk/generated-doona-stage.mk
           if-no-files-found: error
 
   build-core:
@@ -76,12 +76,12 @@ jobs:
           - aarch64
           - armv7
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
 
       # mlugg/setup-zig still targets the Node 20 runtime upstream and has no
       # Node 24 release, so install Zig from the official tarball instead.
@@ -114,7 +114,7 @@ jobs:
         run: ci/build-core.sh
 
       # Named so the '*-source' download pattern below still matches.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: core-${{ matrix.core_arch }}-source
           path: |
@@ -130,7 +130,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           path: source-artifacts
           pattern: '*-source'
@@ -169,7 +169,7 @@ jobs:
         run: |
           set -euo pipefail
           files=(source-artifacts/doona-source/artifacts/cache/*.tar.gz
-                 source-artifacts/doona-source/luci-app-honk/generated-doona-stage.mk
+                 source-artifacts/doona-source/honk/generated-doona-stage.mk
                  source-artifacts/core-*-source/artifacts/cache/*.tar.gz
                  merged/honk/generated-stage.mk
                  merged/honk/generated-provenance.json)
@@ -201,7 +201,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
@@ -237,7 +237,7 @@ jobs:
           gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
             --pattern 'generated-provenance.json' --dir honk --clobber
           gh release download "$HONK_SOURCE_TAG" --repo "${{ github.repository }}" \
-            --pattern 'generated-doona-stage.mk' --dir luci-app-honk --clobber
+            --pattern 'generated-doona-stage.mk' --dir honk --clobber
 
       # No SDK and no container: both packages have an empty Build/Compile, so
       # the only per-architecture difference is which prebuilt honk-core goes
@@ -256,13 +256,23 @@ jobs:
           cp -v artifacts/apk/luci-app-honk-*.apk dist/release/
           cp -v artifacts/apk/luci-app-honk-*.apk dist/feed/
           cp -v artifacts/apk/luci-app-honk.pub.pem dist/release/
+          # The signing key travels with the feed: a client cannot establish
+          # trust in an index without it.
+          cp -v artifacts/apk/luci-app-honk.pub.pem dist/feed/
           for arch in $OPENWRT_ARCHS; do
             if [ ! -d "artifacts/apk/$arch" ]; then
               echo "::error::no package produced for $arch"
               exit 1
             fi
             cp -v "artifacts/apk/$arch/honk-"*.apk dist/release/
-            cp -v "artifacts/apk/$arch/honk-"*.apk dist/feed/
+            mkdir -p "dist/feed/$arch"
+            cp -v "artifacts/apk/$arch/honk-"*.apk "dist/feed/$arch/"
+            cp -v artifacts/apk/luci-app-honk-*.apk "dist/feed/$arch/"
+            [ -s "artifacts/apk/$arch/packages.adb" ] || {
+              echo "::error::no per-architecture index for $arch"
+              exit 1
+            }
+            cp -v "artifacts/apk/$arch/packages.adb" "dist/feed/$arch/"
           done
           [ -s artifacts/apk/packages.adb ] || { echo '::error::packages.adb missing'; exit 1; }
           cp -v artifacts/apk/packages.adb dist/feed/
@@ -287,7 +297,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: packages
           path: dist/
@@ -301,7 +311,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -312,7 +322,7 @@ jobs:
       # `packages-*` filter silently dropped the artifact once the matrix was
       # replaced by the single apk job. A wrong `name:` fails this step instead.
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: packages
           path: all-artifacts
@@ -330,8 +340,16 @@ jobs:
           mkdir -p dist
           find all-artifacts/release -maxdepth 1 -type f -exec cp -v {} dist/ \;
           # One honk package per architecture plus the shared noarch LuCI one.
+          # The expected count is derived from OPENWRT_ARCHS so adding or
+          # removing an architecture does not need a second edit here.
+          source ci/pins.env
+          set -- $OPENWRT_ARCHS
+          expected=$(($# + 1))
           count=$(find dist -maxdepth 1 -type f -name '*.apk' | wc -l)
-          test "$count" -eq 7 || { echo "::error::expected 7 .apk files, got $count"; exit 1; }
+          test "$count" -eq "$expected" || {
+            echo "::error::expected $expected .apk files ($# architectures plus the noarch LuCI package), got $count"
+            exit 1
+          }
           (cd dist && sha256sum ./*.apk > SHA256SUMS)
 
       - name: Read source asset hashes
@@ -366,7 +384,7 @@ jobs:
 
           pins = assignments('ci/pins.env', '=')
           core = assignments('honk/Makefile', ':=')
-          doona = assignments('luci-app-honk/Makefile', ':=')
+          luci = assignments('luci-app-honk/Makefile', ':=')
           source = assignments('source-meta/generated-stage.mk', ':=')
           packages = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                       for path in sorted(Path('dist').iterdir()) if path.suffix == '.apk'}
@@ -377,10 +395,10 @@ jobs:
               'core_commit': pins['CORE_COMMIT'],
               'doona_commit': pins['DOONA_COMMIT'],
               'doona_archive': pins['DOONA_ARCHIVE'],
-              'doona_archive_sha256': doona['PKG_HASH'],
+              'doona_archive_sha256': core['DOONA_HASH'],
               'core_archives_sha256': {key: value for key, value in source.items() if key.startswith('HONK_HASH_')},
               'honk_version': core['PKG_VERSION'] + '-r' + core['PKG_RELEASE'],
-              'luci_version': doona['PKG_VERSION'] + '-r' + doona['PKG_RELEASE'],
+              'luci_version': luci['PKG_VERSION'] + '-r' + luci['PKG_RELEASE'],
               'architectures': sorted(os.environ['OPENWRT_ARCHS'].split()),
               'packages_sha256': packages,
           }
@@ -418,7 +436,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
-          ARCHS="aarch64_cortex-a53 aarch64_cortex-a72 aarch64_generic arm_cortex-a7_neon-vfpv4 arm_cortex-a9 x86_64"
+          # The architecture list comes from ci/pins.env, the single source of
+          # truth; a hardcoded copy here silently dropped architectures from
+          # the release notes when the set changed.
+          source ci/pins.env
+          ARCHS="$OPENWRT_ARCHS"
           PREVIOUS_TAG="$(git tag --sort=-creatordate | grep '^v' | grep -v "^${TAG}$" | head -1 || true)"
 
           if [ -n "$PREVIOUS_TAG" ]; then
@@ -518,7 +540,7 @@ jobs:
           fi
 
       - name: Publish Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
@@ -581,7 +603,7 @@ jobs:
 
       - name: Download artifacts
         if: steps.r2.outputs.enabled == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: packages
           path: artifacts
@@ -593,18 +615,18 @@ jobs:
           source ci/pins.env
           mkdir -p feed
           # The unified feed is addressed per OpenWrt release and package
-          # architecture (<sdk>/<arch>/), so each architecture gets its own
-          # directory. The packages use the 25.12 apk container format
-          # (APK_COMPAT in ci/pins.env); luci-app-honk is PKGARCH:=all and
-          # therefore belongs in every directory. The signed index covers all
-          # architectures and is copied next to each set; apk selects the
-          # entry matching the device's architecture from it.
+          # architecture (<release>/<arch>/), so each architecture gets its
+          # own directory with its own index: the index of a directory lists
+          # only the packages that run on that architecture, plus the
+          # arch-independent luci-app-honk. The release the directory is
+          # named after comes from ci/pins.env instead of being hardcoded.
+          cp -v artifacts/feed/luci-app-honk.pub.pem feed/
           for arch in $OPENWRT_ARCHS; do
-            target="feed/25.12/$arch"
+            target="feed/$OPENWRT_RELEASE/$arch"
             mkdir -p "$target"
-            cp -v artifacts/feed/honk-*-"$arch".apk "$target/"
-            cp -v artifacts/feed/luci-app-honk-*.apk "$target/"
-            cp -v artifacts/feed/packages.adb "$target/"
+            cp -v artifacts/feed/"$arch"/honk-*.apk "$target/"
+            cp -v artifacts/feed/"$arch"/luci-app-honk-*.apk "$target/"
+            cp -v artifacts/feed/"$arch"/packages.adb "$target/"
 
             manifest=""
             for pkg in honk luci-app-honk; do

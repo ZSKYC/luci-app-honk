@@ -17,14 +17,15 @@ for script in honk/files/*.sh luci-app-honk/root/usr/libexec/rpcd/honk luci-app-
 done
 sh -n honk/files/honk.init
 sh -n honk/files/90-honk-boot
-for file in luci-app-honk/htdocs/luci-static/resources/view/honk/{rpc,overview,settings,dashboard,logs,maintenance,sha256}.js; do
+for file in luci-app-honk/htdocs/luci-static/resources/view/honk/{rpc,overview,dashboard,logs,maintenance,sha256}.js; do
 	node --check "$file"
 done
 test ! -e luci-app-honk/htdocs/luci-static/resources/view/honk/configuration.js
 test ! -e luci-app-honk/htdocs/luci-static/resources/view/honk/converter.js
 test ! -d luci-app-honk/htdocs/luci-static/resources/view/honk/vendor
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json
-node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-read.json
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json
 
 grep -q '^CORE_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
@@ -36,8 +37,15 @@ test "$CORE_COMMIT" = "$(sed -n 's/^CORE_COMMIT:=//p' honk/Makefile)"
 # same commit. A mismatch would make the daily job compare two different
 # things and rebuild on every run.
 test "$CORE_RELEASE" = "$CORE_COMMIT"
-test "$DOONA_ARCHIVE" = "$(sed -n 's/^PKG_SOURCE:=//p' luci-app-honk/Makefile)"
-grep -q '^PKG_HASH:=[0-9a-f]\{64\}$' luci-app-honk/Makefile
+# The Doona panel ships in the honk package: the core serves it from
+# /usr/share/doona, so the service must not depend on the LuCI package.
+test "$DOONA_ARCHIVE" = "$(sed -n 's/^DOONA_ARCHIVE?=//p' honk/Makefile)"
+grep -q '^DOONA_HASH?=[0-9a-f]\{64\}$' honk/Makefile
+grep -Fq '$(INSTALL_DIR) $(1)/usr/share/doona' honk/Makefile
+! grep -Fq '$(1)/usr/share/doona' luci-app-honk/Makefile || {
+	echo 'the Doona assets must ship in the honk package, not in luci-app-honk' >&2
+	exit 1
+}
 
 node <<'NODE'
 const fs = require('fs');
@@ -53,9 +61,9 @@ NODE
 verify_stage() {
 	local makefile=$1 archive=$2 checksum expected
 	test -f "$makefile" || return 0
-	checksum=$(sed -n 's/^PKG_HASH:=//p' "$makefile")
+	checksum=$(sed -n 's/^DOONA_HASH:=//p' "$makefile")
 	test "${#checksum}" -eq 64 || { echo "Invalid stage hash in $makefile" >&2; exit 1; }
-	test "$checksum" = "$(sed -n 's/^PKG_HASH:=//p' luci-app-honk/Makefile)" || {
+	test "$checksum" = "$(sed -n 's/^DOONA_HASH?=//p' honk/Makefile)" || {
 		echo "Committed Doona hash differs from staged archive." >&2
 		exit 1
 	}
@@ -64,19 +72,30 @@ verify_stage() {
 		test "$checksum" = "$expected" || { echo "Staged archive hash mismatch: $archive" >&2; exit 1; }
 	fi
 }
-verify_stage luci-app-honk/generated-doona-stage.mk "$DOONA_ARCHIVE"
+verify_stage honk/generated-doona-stage.mk "$DOONA_ARCHIVE"
 
 node <<'NODE'
 const fs = require('fs');
 const rpcSource = fs.readFileSync('luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js', 'utf8');
 const backend = fs.readFileSync('luci-app-honk/root/usr/libexec/rpcd/honk', 'utf8');
-const acl = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json', 'utf8'))['luci-app-honk'];
-const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply'];
+const readAcl = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-read.json', 'utf8'))['luci-app-honk-read'];
+const adminAcl = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json', 'utf8'))['luci-app-honk-admin'];
+const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply', 'set_geo'];
 const frontend = [...rpcSource.matchAll(/method:\s*'([^']+)'/g)].map(match => match[1]);
 const list = backend.match(/echo '([^']+)'/);
 if (!list) throw new Error('RPC backend has no list method declaration');
 const declared = Object.keys(JSON.parse(list[1]));
-const aclMethods = [...(acl.read.ubus.honk || []), ...(acl.write.ubus.honk || [])].sort();
+const aclMethods = [...new Set([
+	...(readAcl.read.ubus.honk || []),
+	...(adminAcl.read.ubus.honk || []),
+	...(adminAcl.write.ubus.honk || [])
+])].sort();
+// The read role must not carry the maintenance operations.
+const adminOnly = ['initialize', 'start', 'stop', 'restart', 'settings', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'update_apply', 'set_geo'];
+for (const method of adminOnly) {
+	if ((readAcl.read.ubus.honk || []).includes(method))
+		throw new Error(`the read role must not grant ${method}`);
+}
 for (const [label, methods] of [['frontend', frontend], ['backend list', declared], ['ACL', aclMethods]]) {
 	if (JSON.stringify([...methods].sort()) !== JSON.stringify([...expected].sort()))
 		throw new Error(`${label} RPC methods do not match the required method set: ${methods.join(', ')}`);
@@ -188,7 +207,28 @@ grep -Fq '$(INSTALL_DATA) $(PKG_BUILD_DIR)/honk.zh-cn.lmo' luci-app-honk/Makefil
 	echo 'luci-app-honk must not install the removed vendor directory' >&2
 	exit 1
 }
-grep -Fq '"/tmp/honk-maintenance/restore.tar.gz": [ "write" ]' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
+grep -Fq '"/tmp/honk-runtime/restore.tar.gz": [ "write" ]' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json
+
+# The panel assets are optional: the core serves the fallback page that ships
+# with the honk package when they are gone, so a missing panel must not take
+# the service down with it.
+# The kernel function tracer decides whether UDP can be proxied at all. A
+# kernel without it has to be reported instead of silently degrading.
+grep -Fq 'honk_kernel_tracer_available' honk/files/kernel.sh
+grep -Fq 'honk_kernel_tracer_available' honk/files/control.sh
+grep -Fq 'honk_kernel_tracer_available' luci-app-honk/root/usr/libexec/rpcd/honk
+grep -Fq 'udp_trace_unavailable' luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js
+grep -Fq 'files/kernel.sh' honk/Makefile
+
+grep -Fq 'honk_ui_path()' honk/files/control.sh
+grep -Fq 'honk_ui_path()' honk/files/maintenance.sh
+grep -Fq 'sync_ui_path' honk/files/control.sh
+grep -Fq '$(INSTALL_DIR) $(1)/usr/share/honk/ui' honk/Makefile
+test -f honk/files/ui/index.html
+! grep -Fq '[ -r /usr/share/doona/index.html ] ||' honk/files/control.sh || {
+	echo 'the panel assets must not be a hard requirement of the service' >&2
+	exit 1
+}
 
 grep -Fq 'HONK_ASSET_X86_64?=' honk/Makefile
 grep -Fq 'HONK_ASSET_AARCH64?=' honk/Makefile
@@ -229,7 +269,8 @@ grep -Fq "honk.settings(networkSelect.value, port, bootEnabledInput.checked)" lu
 ! grep -RqiE 'add_subscription|add_nodes|import_dae|importDae|addSubscription|addNodes' \
 	luci-app-honk/htdocs/luci-static/resources/view/honk \
 	luci-app-honk/root/usr/libexec/rpcd/honk \
-	luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json || {
+	luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-read.json \
+	luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json || {
 	echo 'a removed configuration method is still referenced' >&2
 	exit 1
 }
@@ -237,7 +278,7 @@ grep -Fq "honk.settings(networkSelect.value, port, bootEnabledInput.checked)" lu
 	echo 'the removed configuration view is still in the menu' >&2
 	exit 1
 }
-! grep -q 'honk-v2-upload' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json || {
+! grep -Rq 'honk-v2-upload' luci-app-honk/root/usr/share/rpcd/acl.d || {
 	echo 'the removed dae import upload path is still in the ACL' >&2
 	exit 1
 }
@@ -246,7 +287,8 @@ grep -Fq "honk.settings(networkSelect.value, port, bootEnabledInput.checked)" lu
 # that keeps the management API on the lan zone.
 grep -Fq 'honk_native_api_lan' honk/files/firewall.sh
 grep -Fq 'honk_native_api_wan' honk/files/firewall.sh
-grep -Fq "option src='lan'" honk/files/firewall.sh || grep -Fq ".src='lan'" honk/files/firewall.sh
+grep -Fq 'honk_firewall_lan_zone' honk/files/firewall.sh
+grep -Fq 'honk_firewall_network_zone' honk/files/firewall.sh
 grep -Fq ".src='wan'" honk/files/firewall.sh
 grep -Fq 'target' honk/files/firewall.sh
 grep -Fq 'files/firewall.sh' honk/Makefile
@@ -362,6 +404,64 @@ grep -Fq 'R2 credentials are absent' .github/workflows/release.yml || {
 	exit 1
 }
 
+# The install path verifies what it downloads and trusts the release signing
+# key: a proxy or a mirror that is compromised must not be able to install
+# anything as root.
+grep -Fq 'verify_sha256' scripts/install.sh || {
+	echo 'scripts/install.sh must verify the sha256 of every downloaded package' >&2
+	exit 1
+}
+grep -Fq 'SHA256SUMS' scripts/install.sh || {
+	echo 'scripts/install.sh must use the SHA256SUMS file of the release' >&2
+	exit 1
+}
+grep -Fq '/etc/apk/keys' scripts/install.sh || {
+	echo 'scripts/install.sh must install the release signing key into /etc/apk/keys' >&2
+	exit 1
+}
+grep -Fq 'apk add "$honk_file" "$luci_file"' scripts/install.sh || {
+	echo 'scripts/install.sh must install the own packages with the trusted key' >&2
+	exit 1
+}
+! grep -Fq 'apk add --allow-untrusted "$honk_file"' scripts/install.sh || {
+	echo 'scripts/install.sh must not install the own packages as untrusted' >&2
+	exit 1
+}
+grep -Fq 'GH_PROXY="${GH_PROXY:-}"' scripts/install.sh || {
+	echo 'the third party proxy must be opt in, not the default' >&2
+	exit 1
+}
+! grep -Fq -- '--no-check-certificate' README.md scripts/install.sh || {
+	echo 'the installer must not disable the certificate check' >&2
+	exit 1
+}
+
+# Every action is pinned to a commit: a floating tag lets a moved tag change
+# the code that runs with the release secrets.
+while IFS= read -r action; do
+	ref=${action#*@}
+	case "$ref" in
+		''|*[!0-9a-f]*) echo "the action $action is not pinned to a commit" >&2; exit 1 ;;
+	esac
+	[ "${#ref}" -eq 40 ] || { echo "the action $action is not pinned to a full commit" >&2; exit 1; }
+done < <(grep -rhoE 'uses: [^ ]+' .github/workflows/ | sed 's/^uses: //' | sort -u)
+
+# The packaging and the runtime smoke tests are part of the pull request
+# pipeline: a packaging defect must not wait for the next release.
+test -f ci/smoke-native-api.sh
+bash -n ci/smoke-native-api.sh
+grep -Fq 'ci/smoke-native-api.sh' .github/workflows/build.yml
+grep -Fq 'ci/build-apk.sh' .github/workflows/build.yml
+grep -Fq 'package-smoke' .github/workflows/build.yml
+grep -Fq 'native-api-smoke' .github/workflows/build.yml
+
+# The feed has to be usable on its own: one index per architecture and the
+# signing key next to it.
+grep -Fq 'packages.adb' .github/workflows/release.yml
+grep -Fq 'luci-app-honk.pub.pem' .github/workflows/release.yml
+grep -Fq 'OPENWRT_RELEASE' .github/workflows/release.yml
+grep -Fq 'OPENWRT_RELEASE' ci/pins.env
+
 # The R2 credentials are read from a file outside the repository. The helper
 # must never read them from the tree, and the tree must not carry one.
 test -f scripts/set-r2-secrets.sh
@@ -435,6 +535,13 @@ grep -Fq 'chown -R 0:0' ci/build-apk.sh || {
 # packaged firewall.sh; the firewall cleanup has to be inline.
 ! awk '/^define Package\/honk\/postrm$/,/^endef$/' honk/Makefile | grep -q 'honk_firewall_remove' || {
 	echo 'Package/honk/postrm must not source the packaged firewall.sh' >&2
+	exit 1
+}
+# The lan, the wan and every other zone get their own rule, so the postrm has
+# to remove all of them and not just the two named ones.
+awk '/^define Package\/honk\/postrm$/,/^endef$/' honk/Makefile |
+	grep -q 'honk_native_api\[a-z0-9_\]' || {
+	echo 'Package/honk/postrm must remove every honk firewall rule' >&2
 	exit 1
 }
 

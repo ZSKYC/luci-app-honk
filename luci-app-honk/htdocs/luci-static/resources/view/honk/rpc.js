@@ -53,6 +53,12 @@ const callLogs = rpc.declare({
 });
 const callUpdateCheck = rpc.declare({ object: 'honk', method: 'update_check', expect: { '': {} } });
 const callUpdateApply = rpc.declare({ object: 'honk', method: 'update_apply', expect: { '': {} } });
+const callSetGeo = rpc.declare({
+	object: 'honk',
+	method: 'set_geo',
+	params: [ 'geoip_url', 'geosite_url', 'geo_auto', 'geo_auto_freq' ],
+	expect: { '': {} }
+});
 
 let pageStylesInstalled = false;
 
@@ -92,6 +98,14 @@ function hostFromApiUrl(apiUrl) {
 	}
 }
 
+function isLoopback(host) {
+	const bare = String(host || '').replace(/^\[|\]$/g, '').toLowerCase();
+	if (bare === 'localhost' || bare === '::1' || bare === '0:0:0:0:0:0:0:1')
+		return true;
+	const octets = bare.split('.');
+	return octets.length === 4 && octets.every(function(part) { return Number(part) === 0; });
+}
+
 function localWebUi(status) {
 	if (!status || !status.initialized || !status.running || !status.api_ready)
 		return null;
@@ -104,10 +118,15 @@ function localWebUi(status) {
 	// through the address the browser already uses for the router. A wildcard
 	// bind accepts only an IP literal or localhost as the Host, so a name the
 	// browser used falls back to the address the core reports.
-	let host = (window.location && window.location.hostname) || '';
+	const browserHost = (window.location && window.location.hostname) || '';
+	let host = browserHost;
 	if (!isIpLiteral(host) && host !== 'localhost')
 		host = hostFromApiUrl(status.api_url);
 	if (!host)
+		return null;
+	// A loopback address only reaches a browser on the router itself; on any
+	// other machine it would open the client instead of the panel.
+	if (isLoopback(host) && !isLoopback(browserHost))
 		return null;
 
 	return 'http://' + authorityHost(host) + ':' + port + '/ui/';
@@ -169,10 +188,23 @@ function tokenMessage(token) {
 		initialize_before_enabling_service: _('Complete initial setup before enabling Honk.'),
 		system_config_unavailable: _('Honk system configuration is unavailable.'),
 		package_config_unavailable: _('Honk configuration is unavailable.'),
-		service_apply_failed_rolled_back: _('Settings could not be applied. The previous settings were restored.')
+		service_apply_failed_rolled_back: _('Settings could not be applied. The previous settings were restored.'),
+		invalid_credentials: _('The administrator name or password is not correct.'),
+		core_missing: _('The Honk core binary is missing. Reinstall the package.'),
+		ui_assets_missing: _('The Honk panel assets are missing. Reinstall the honk package.'),
+		udp_trace_unavailable: _('The kernel has no function tracer, so UDP and QUIC traffic is not proxied. TCP traffic is unaffected.'),
+		administrator_exists_reuse_credentials_or_reset_state: _('An administrator already exists. Use the same credentials or reset the data.'),
+		invalid_settings_json: _('The settings request is not valid.'),
+		settings_too_large: _('The settings request is too large.'),
+		invalid_geo_url: _('The geo data URL is not a valid https URL.'),
+		invalid_geo_auto: _('The auto-update switch is not valid.'),
+		invalid_geo_auto_freq: _('The auto-update schedule is not valid.'),
+		geo_settings_saved: _('Geo data source saved.')
 	};
 
-	return messages[token] || null;
+	// An unknown token is shown as it is: a swallowed reason leaves the user
+	// with a generic message and nothing to act on.
+	return messages[token] || token || null;
 }
 
 function statusIssue(token) {
@@ -265,6 +297,7 @@ return baseclass.extend({
 	logs: callLogs,
 	updateCheck: callUpdateCheck,
 	updateApply: callUpdateApply,
+	setGeo: callSetGeo,
 	waitJob: waitJob,
 	ensureOk: ensureOk,
 	localWebUi: localWebUi,

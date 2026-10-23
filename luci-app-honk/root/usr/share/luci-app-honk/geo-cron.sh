@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
 # geo-cron.sh enable|disable
 # Manage the geo auto-update crontab entry. enable reads the schedule from
 # honk.main.geo_auto_freq (daily|weekly); both actions are idempotent.
@@ -17,6 +18,9 @@ clean() {
 	[ -f "$CRONTAB" ] || return 0
 	grep -vF -e "$TAG" -e "$SCRIPT" "$CRONTAB" > "$CRONTAB.tmp" 2>/dev/null
 	mv "$CRONTAB.tmp" "$CRONTAB"
+	# The rewrite must not widen the permissions of the crontab: it holds
+	# the jobs of every service on the device.
+	chmod 0600 "$CRONTAB" 2>/dev/null
 }
 
 clean
@@ -31,6 +35,7 @@ if [ "$ACTION" = "enable" ]; then
 		echo "$TAG"
 		echo "$sched $SCRIPT geoip; $SCRIPT geosite"
 	} >> "$CRONTAB"
+	chmod 0600 "$CRONTAB" 2>/dev/null
 	/etc/init.d/cron enable >/dev/null 2>&1
 fi
 

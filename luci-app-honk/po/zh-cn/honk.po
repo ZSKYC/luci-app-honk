@@ -52,7 +52,6 @@ msgid "Honk restarted."
 msgstr "Honk 已重启。"
 
 #: htdocs/luci-static/resources/view/honk/rpc.js:128
-#: htdocs/luci-static/resources/view/honk/settings.js:88
 msgid "Settings saved and applied."
 msgstr "设置已保存并应用。"
 
@@ -364,32 +363,26 @@ msgid "Service settings"
 msgstr "服务设置"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:215
-#: htdocs/luci-static/resources/view/honk/settings.js:71
 msgid "No network interfaces found"
 msgstr "未找到网络接口"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:216
-#: htdocs/luci-static/resources/view/honk/settings.js:72
 msgid "LAN network"
 msgstr "LAN 网络"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:217
-#: htdocs/luci-static/resources/view/honk/settings.js:73
 msgid "Listen port"
 msgstr "监听端口"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:218
-#: htdocs/luci-static/resources/view/honk/settings.js:74
 msgid "Start Honk at boot"
 msgstr "开机时启动 Honk"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:225
-#: htdocs/luci-static/resources/view/honk/settings.js:81
 msgid "Choose a LAN network and a port from 1024 to 65535."
 msgstr "请选择 LAN 网络，并将端口设置为 1024 至 65535。"
 
 #: htdocs/luci-static/resources/view/honk/overview.js:231
-#: htdocs/luci-static/resources/view/honk/settings.js:86
 msgid "Saving…"
 msgstr "正在保存……"
 
@@ -460,36 +453,6 @@ msgstr "Honk"
 #: htdocs/luci-static/resources/view/honk/overview.js:336
 msgid "Transparent proxy core for OpenWrt. Start, stop and manage the Honk service."
 msgstr "OpenWrt 的透明代理核心。启动、停止并管理 Honk 服务。"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:53
-msgid "Save settings"
-msgstr "保存设置"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:65
-msgid "Honk settings"
-msgstr "Honk 设置"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:67
-#, javascript-format
-msgid "Could not read current settings: %s"
-msgstr "无法读取当前设置：%s"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:69
-#, javascript-format
-msgid "Could not load LAN networks: %s"
-msgstr "无法读取 LAN 网络：%s"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:90
-msgid "Save failed. Check the settings and system status."
-msgstr "保存失败，请检查设置和系统状态。"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:97
-msgid "Settings"
-msgstr "设置"
-
-#: htdocs/luci-static/resources/view/honk/settings.js:98
-msgid "Network interface, listen port and boot behaviour for the Honk service."
-msgstr "Honk 服务的网络接口、监听端口与开机启动行为。"
 
 #: htdocs/luci-static/resources/view/honk/logs.js:88
 msgid "Core"
@@ -864,3 +827,47 @@ msgstr "Doona 尚未就绪，请在概况页查看状态。"
 #: htdocs/luci-static/resources/view/honk/dashboard.js:112
 msgid "Refreshing status…"
 msgstr "正在刷新状态……"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:180
+msgid "The administrator name or password is not correct."
+msgstr "管理员用户名或密码不正确。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:181
+msgid "The Honk core binary is missing. Reinstall the package."
+msgstr "Honk 核心程序缺失，请重新安装 honk 包。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:182
+msgid "The Honk panel assets are missing. Reinstall the honk package."
+msgstr "Honk 面板资源缺失，请重新安装 honk 包。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:183
+msgid "The kernel has no function tracer, so UDP and QUIC traffic is not proxied. TCP traffic is unaffected."
+msgstr "内核未启用 function tracer，UDP 与 QUIC 流量不会被代理，TCP 流量不受影响。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:184
+msgid "An administrator already exists. Use the same credentials or reset the data."
+msgstr "管理员已存在，请使用原有凭据，或先重置数据。"
+
+#: htdocs/luci-static/resources/view/honk/overview.js:170
+msgid "The Doona panel assets are missing. The service runs, but the panel shows a placeholder. Reinstall the honk package."
+msgstr "Doona 面板资源缺失。服务仍可运行，但面板只显示占位页，请重新安装 honk 包。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:184
+msgid "The settings request is not valid."
+msgstr "设置请求无效。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:185
+msgid "The settings request is too large."
+msgstr "设置请求过大。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:186
+msgid "The geo data URL is not a valid https URL."
+msgstr "Geo 数据源地址不是有效的 https 地址。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:187
+msgid "The auto-update switch is not valid."
+msgstr "自动更新开关无效。"
+
+#: htdocs/luci-static/resources/view/honk/rpc.js:188
+msgid "The auto-update schedule is not valid."
+msgstr "自动更新周期无效。"

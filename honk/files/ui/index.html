@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Honk · 面板资源缺失</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+	margin: 0;
+	padding: 3rem 1.5rem;
+	font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+	display: flex;
+	justify-content: center;
+}
+main { max-width: 34rem; }
+h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+p { margin: 0 0 1rem; }
+code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.9em;
+	padding: 0.1em 0.35em;
+	border-radius: 4px;
+	background: rgba(127, 127, 127, 0.18);
+}
+</style>
+</head>
+<body>
+<main>
+<h1>Doona 面板资源缺失</h1>
+<p>Honk 核心已经启动，但它找不到 Doona 面板的静态资源，因此无法提供完整的 Web 界面。</p>
+<p>面板资源随 <code>honk</code> 包一起安装。重新安装该包即可恢复：</p>
+<p><code>apk add --force-reinstall honk</code></p>
+<p>LuCI 运维界面（服务 → Honk）不受影响，代理功能也照常工作。</p>
+</main>
+</body>
+</html>

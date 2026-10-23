@@ -1,6 +1,6 @@
 {
-	"luci-app-honk": {
-		"description": "Grant access to Honk controls and maintenance",
+	"luci-app-honk-admin": {
+		"description": "Grant access to the Honk controls and the maintenance operations",
 		"read": {
 			"ubus": {
 				"honk": [ "status", "check", "job_status", "logs", "update_check" ],
@@ -8,13 +8,13 @@
 				"network.interface": [ "dump" ]
 			},
 			"file": {
-				"/tmp/honk-backup.tar.gz": [ "read" ],
+				"/tmp/honk-runtime/backup.tar.gz": [ "read" ],
 				"/usr/share/v2ray/geoip.dat": [ "read" ],
 				"/usr/share/v2ray/geosite.dat": [ "read" ],
-				"/tmp/luci-app-honk.geoip.log": [ "read" ],
-				"/tmp/luci-app-honk.geosite.log": [ "read" ],
-				"/tmp/luci-app-honk.pkg-honk.log": [ "read" ],
-				"/tmp/luci-app-honk.pkg-luci-app-honk.log": [ "read" ],
+				"/tmp/honk-runtime/geoip.log": [ "read" ],
+				"/tmp/honk-runtime/geosite.log": [ "read" ],
+				"/tmp/honk-runtime/pkg-honk.log": [ "read" ],
+				"/tmp/honk-runtime/pkg-luci-app-honk.log": [ "read" ],
 				"/usr/share/luci-app-honk/pkg-info.sh honk": [ "exec" ],
 				"/usr/share/luci-app-honk/pkg-info.sh luci-app-honk": [ "exec" ],
 				"/usr/share/luci-app-honk/refresh-index.sh": [ "exec" ]
@@ -24,18 +24,17 @@
 		"write": {
 			"cgi-io": [ "upload" ],
 			"ubus": {
-				"honk": [ "initialize", "start", "stop", "restart", "settings", "repair", "backup", "restore", "restore_prepare", "reset", "update_apply" ]
+				"honk": [ "initialize", "start", "stop", "restart", "settings", "repair", "backup", "restore", "restore_prepare", "reset", "update_apply", "set_geo" ]
 			},
 			"file": {
-				"/tmp/honk-maintenance/restore.tar.gz": [ "write" ],
+				"/tmp/honk-runtime/restore.tar.gz": [ "write" ],
 				"/usr/share/luci-app-honk/update-geo.sh geoip": [ "exec" ],
 				"/usr/share/luci-app-honk/update-geo.sh geosite": [ "exec" ],
 				"/usr/share/luci-app-honk/geo-cron.sh enable": [ "exec" ],
 				"/usr/share/luci-app-honk/geo-cron.sh disable": [ "exec" ],
 				"/usr/share/luci-app-honk/update-pkg.sh honk": [ "exec" ],
 				"/usr/share/luci-app-honk/update-pkg.sh luci-app-honk": [ "exec" ]
-			},
-			"uci": [ "honk" ]
+			}
 		}
 	}
 }

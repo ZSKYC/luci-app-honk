@@ -3,12 +3,23 @@
 set -eu
 
 REPO="szwjp/luci-app-honk"
-# 用 /releases?per_page=1 而不是 /releases/latest：后者在全部为
-# pre-release 时返回 404。
-GH_API="https://api.github.com/repos/${REPO}/releases?per_page=1"
-GH_PROXY="${GH_PROXY:-https://ghfast.top/}"
+# 取最近若干个 release 而不是 /releases/latest：后者在全部为 pre-release 时
+# 返回 404，而最近的一个 release 可能只有构建资产、没有可安装的包。
+GH_API="https://api.github.com/repos/${REPO}/releases?per_page=10"
+GH_RELEASE_API="https://api.github.com/repos/${REPO}/releases/tags"
+# 第三方代理是可选的：GH_PROXY 置空即直连 GitHub。走代理时也只允许 https，
+# 而且它只能保护传输，不能替代下面的签名校验。
+GH_PROXY="${GH_PROXY:-}"
 GEO_FEED="https://down.dllkids.xyz/openwrt-feed"
 TMP_DIR="/tmp/honk-install"
+# 设备信任的签名公钥。它随每次 release 发布，安装到 /etc/apk/keys 之后
+# apk 才会校验安装包的签名。
+APK_KEY_FILE="/etc/apk/keys/luci-app-honk.rsa.pub"
+
+cleanup() {
+	rm -rf "$TMP_DIR" 2>/dev/null || :
+}
+trap cleanup EXIT INT TERM
 
 fetch_text() {
 	url="$1"
@@ -17,17 +28,56 @@ fetch_text() {
 
 download_file() {
 	url="$1"; out="$2"
-	# Note: --allow-untrusted is used at install time because these packages are
-	# built in CI and signed with an ephemeral key the device does not trust.
-	# Downloads go through a proxy by default; retry to survive flaky networks.
+	# The packages are downloaded over https; the proxy is optional and only
+	# ever prefixes a github url.
 	if command -v curl >/dev/null 2>&1; then curl -fL --connect-timeout 10 --max-time 300 --retry 5 --retry-delay 10 --retry-all-errors "$url" -o "$out"; else wget -qO "$out" "$url"; fi
 }
 
 proxy_url() {
 	case "$1" in
-		https://github.com/*) printf '%s%s\n' "$GH_PROXY" "$1" ;;
+		https://github.com/*)
+			[ -n "$GH_PROXY" ] || { printf '%s\n' "$1"; return 0; }
+			case "$GH_PROXY" in
+				https://*) printf '%s%s\n' "$GH_PROXY" "$1" ;;
+				*)
+					echo "GH_PROXY 必须是 https 地址。" >&2
+					return 1
+					;;
+			esac
+			;;
 		*) printf '%s\n' "$1" ;;
 	esac
+}
+
+sha256_of() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{ print $1 }'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{ print $1 }'
+	else
+		openssl dgst -sha256 "$1" | awk '{ print $NF }'
+	fi
+}
+
+# The sha256 of a downloaded file, compared with the one the release
+# published. A file that is not listed is refused.
+verify_sha256() {
+	[ -f "$1" ] || return 1
+	[ -n "$2" ] || return 1
+	[ "${#2}" -eq 64 ] || return 1
+	case "$2" in *[!0-9a-f]*) return 1 ;; esac
+	actual="$(sha256_of "$1")" || return 1
+	[ "$actual" = "$2" ]
+}
+
+# The sha256 of an asset, taken from the SHA256SUMS file of the release.
+sums_lookup() {
+	awk -v name="$2" '$2 == "./" name || $2 == name { print $1; exit }' "$1"
+}
+
+# The browser download url of the first asset whose name matches the pattern.
+asset_url() {
+	printf '%s' "$1" | grep -oE "\"browser_download_url\": *\"[^\"]*/${2}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1
 }
 
 detect_sdk() {
@@ -90,6 +140,35 @@ apk_installed_version() {
 	apk list --installed "$1" | awk -v expected="$1-$2" '$1 == expected { found = 1 } END { exit !found }'
 }
 
+# The newest release that is not a pre-release and that carries an installable
+# package for this architecture. A failed run leaves a "source-*" pre-release
+# behind, and that one has no packages at all.
+select_release() {
+	for tag in $(fetch_text "$GH_API" | grep -oE '"tag_name": "[^"]+"' | sed 's/.*"tag_name": "//; s/"$//'); do
+		[ -n "$tag" ] || continue
+		json="$(fetch_text "$GH_RELEASE_API/$tag")" || continue
+		case "$json" in
+			*'"prerelease": true'*) continue ;;
+		esac
+		release_honk_asset="$(asset_url "$json" "honk-[^\"/]*${RELEASE_ARCH}\.${EXT}")"
+		[ -n "$release_honk_asset" ] || continue
+		release_luci_asset="$(asset_url "$json" "luci-app-honk-[^\"/]*\.${EXT}")"
+		[ -n "$release_luci_asset" ] || continue
+		release_sums_asset="$(asset_url "$json" "SHA256SUMS")"
+		[ -n "$release_sums_asset" ] || continue
+		release_key_asset="$(asset_url "$json" "luci-app-honk\.pub\.pem")"
+		[ -n "$release_key_asset" ] || continue
+		RELEASE_TAG=$tag
+		RELEASE_JSON=$json
+		RELEASE_HONK_ASSET=$release_honk_asset
+		RELEASE_LUCI_ASSET=$release_luci_asset
+		RELEASE_SUMS_ASSET=$release_sums_asset
+		RELEASE_KEY_ASSET=$release_key_asset
+		return 0
+	done
+	return 1
+}
+
 main() {
 	PM="$(detect_manager)"
 	[ "$PM" = unsupported ] && { echo "无法识别包管理器（opkg/apk）。" >&2; exit 1; }
@@ -102,7 +181,7 @@ main() {
 
 	if [ "$PM" = opkg ]; then
 		echo "检测到 opkg：只支持 OpenWrt / ImmortalWrt 25.12 及更新版本（apk）。" >&2
-		echo "当前系统版本：${SDK:-未知}" >&2
+		echo "当前系统版本：${SDK:-未知}（apk 通道）。" >&2
 		exit 1
 	fi
 	EXT=apk
@@ -114,58 +193,53 @@ main() {
 		echo "注意：系统缺少 curl，请确认软件源可用（否则安装会失败）：$PM add curl" >&2
 	fi
 
+	# 架构回退：aarch64_generic 的包也能装在别的 aarch64 上。
+	RELEASE_ARCH=$ARCH
+	alt="$(fallback_arch "$ARCH" || true)"
+	[ -z "$alt" ] || RELEASE_ARCH=$alt
+
 	echo "检测到：架构 $ARCH · SDK $SDK · $PM"
+	[ "$RELEASE_ARCH" = "$ARCH" ] || echo "架构 $ARCH 无独立包，回退到 $RELEASE_ARCH。"
 
-	release_json="$(fetch_text "$GH_API")"
-	[ -n "$release_json" ] || { echo "无法获取最新 Release 信息。" >&2; exit 1; }
-
-	# 从 release assets 里挑出本机架构的 honk 与 luci-app-honk。
-	# 资产 URL 里带仓库路径（.../szwjp/luci-app-honk/releases/download/...），
-	# 所以匹配必须锚定到文件名（最后一个 `/` 之后）：对整条 URL 做
-	# grep -v "luci-app-honk" 会连所有 honk 资产一起排除掉。
-	honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/honk-[^\"/]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	# luci 是 noarch，但 APK 资产仍带架构后缀；优先取本机架构，其次 noarch，最后任意一个。
-	luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*${ARCH}\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	if [ -z "$luci_asset" ]; then
-		# luci-app-honk 是 PKGARCH:=all，发布里只有一个 noarch 包。
-		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*noarch\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	fi
-	if [ -z "$luci_asset" ]; then
-		luci_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/luci-app-honk-[^\"/]*\.${EXT}\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-	fi
-
-	if [ -z "$honk_asset" ] && [ "$PM" = apk ]; then
-		alt="$(fallback_arch "$ARCH" || true)"
-		if [ -n "$alt" ]; then
-			echo "架构 $ARCH 无独立包，回退到 $alt。"
-			honk_asset="$(printf '%s' "$release_json" | grep -oE "\"browser_download_url\": *\"[^\"]*/honk-[^\"/]*${alt}\.apk\"" | sed -E 's/.*"([^"]+)".*/\1/' | head -n 1)"
-		fi
-	fi
-
-	[ -n "$honk_asset" ] || { echo "未找到 $ARCH 的 honk 包。" >&2; exit 1; }
-	[ -n "$luci_asset" ] || { echo "未找到 luci-app-honk 包。" >&2; exit 1; }
+	select_release || { echo "未找到包含 $RELEASE_ARCH 安装包的正式 Release。" >&2; exit 1; }
+	echo "使用 Release $RELEASE_TAG"
 
 	mkdir -p "$TMP_DIR"
-	honk_file="$TMP_DIR/$(basename "$honk_asset")"
-	luci_file="$TMP_DIR/$(basename "$luci_asset")"
+	chmod 0700 "$TMP_DIR"
+	honk_file="$TMP_DIR/$(basename "$RELEASE_HONK_ASSET")"
+	luci_file="$TMP_DIR/$(basename "$RELEASE_LUCI_ASSET")"
+	sums_file="$TMP_DIR/SHA256SUMS"
+	key_file="$TMP_DIR/luci-app-honk.pub.pem"
 
-	echo "下载 $honk_asset"
-	download_file "$(proxy_url "$honk_asset")" "$honk_file"
-	echo "下载 $luci_asset"
-	download_file "$(proxy_url "$luci_asset")" "$luci_file"
+	echo "下载 $RELEASE_HONK_ASSET"
+	download_file "$(proxy_url "$RELEASE_HONK_ASSET")" "$honk_file"
+	echo "下载 $RELEASE_LUCI_ASSET"
+	download_file "$(proxy_url "$RELEASE_LUCI_ASSET")" "$luci_file"
+	echo "下载校验文件与签名公钥"
+	download_file "$(proxy_url "$RELEASE_SUMS_ASSET")" "$sums_file"
+	download_file "$(proxy_url "$RELEASE_KEY_ASSET")" "$key_file"
+
+	# 逐包校验：下载到的文件必须与 release 公布的散列一致。
+	honk_sum="$(sums_lookup "$sums_file" "$(basename "$honk_file")")"
+	luci_sum="$(sums_lookup "$sums_file" "$(basename "$luci_file")")"
+	verify_sha256 "$honk_file" "$honk_sum" || { echo "honk 包的 sha256 与 release 公布的不一致，安装中止。" >&2; exit 1; }
+	verify_sha256 "$luci_file" "$luci_sum" || { echo "luci-app-honk 包的 sha256 与 release 公布的不一致，安装中止。" >&2; exit 1; }
+
+	# 设备信任发布方的签名：公钥装进 /etc/apk/keys，之后 apk 用普通模式
+	# 安装，签名不匹配就会拒绝。
+	mkdir -p /etc/apk/keys
+	cp "$key_file" "$APK_KEY_FILE" || { echo "无法安装签名公钥到 $APK_KEY_FILE。" >&2; exit 1; }
+	chmod 0644 "$APK_KEY_FILE"
 
 	set -- "$honk_file" "$luci_file"
+	geo_files=""
 	if geodata_installed; then
 		echo "复用已安装的 v2ray-geoip/geosite 数据。"
 	else
 		geo_dir="$GEO_FEED/$SDK/$ARCH"
 		geo_listing="$(fetch_text "$geo_dir/" || true)"
 		for pkg in v2ray-geoip v2ray-geosite; do
-			if [ "$PM" = apk ]; then
-				geo_name="$(printf '%s\n' "$geo_listing" | grep -oE "${pkg}-[0-9][^\"/<]*\\.apk" | head -n 1)"
-			else
-				geo_name="$(printf '%s\n' "$geo_listing" | grep -oE "${pkg}_[^\"/<]*_all\\.ipk" | head -n 1)"
-			fi
+			geo_name="$(printf '%s\n' "$geo_listing" | grep -oE "${pkg}-[0-9][^\"/<]*\\.apk" | head -n 1)"
 			if [ -z "$geo_name" ]; then
 				echo "未找到 $pkg 的 $SDK/$ARCH 安装包，将尝试设备现有软件源。" >&2
 				continue
@@ -173,8 +247,9 @@ main() {
 			geo_file="$TMP_DIR/$geo_name"
 			echo "下载 $geo_dir/$geo_name"
 			if download_file "$geo_dir/$geo_name" "$geo_file"; then
-				if [ "$PM" = apk ]; then apk --allow-untrusted verify "$geo_file" || exit 1; fi
-				set -- "$@" "$geo_file"
+				# 第三方 feed 的包没有本仓库的签名，只能校验容器完整性。
+				apk --allow-untrusted verify "$geo_file" || exit 1
+				geo_files="$geo_files $geo_file"
 			else
 				echo "$pkg 下载失败，将尝试设备现有软件源。" >&2
 			fi
@@ -182,38 +257,35 @@ main() {
 	fi
 
 	echo "安装 honk、luci-app-honk 及所需 geo 数据"
-	if [ "$PM" = apk ]; then
-		apk --allow-untrusted verify "$honk_file" "$luci_file" || exit 1
-		honk_version="$(apk_file_version "$honk_file" honk)" || exit 1
-		luci_version="$(apk_file_version "$luci_file" luci-app-honk)" || exit 1
-		install_rc=0
-		install_output="$(apk add --allow-untrusted "$@" 2>&1)" || install_rc=$?
-		printf '%s\n' "$install_output"
-	else
-		opkg install "$@"
+	install_rc=0
+	if [ -n "$geo_files" ]; then
+		# shellcheck disable=SC2086
+		apk add --allow-untrusted $geo_files 2>&1 || install_rc=$?
 	fi
+	honk_version="$(apk_file_version "$honk_file" honk)" || exit 1
+	luci_version="$(apk_file_version "$luci_file" luci-app-honk)" || exit 1
+	install_output="$(apk add "$honk_file" "$luci_file" 2>&1)" || install_rc=$?
+	printf '%s\n' "$install_output"
 
-	if [ "$PM" = apk ]; then
-		apk_installed_version honk "$honk_version" && apk_installed_version luci-app-honk "$luci_version" || {
-			echo "apk 安装失败：目标版本未全部装入（退出码 $install_rc）。" >&2
-			exit 1
-		}
-		if [ "$install_rc" -ne 0 ] && printf '%s\n' "$install_output" | grep -q '^ERROR:'; then
-			echo "apk 安装脚本或依赖报错（退出码 $install_rc），请检查上方错误。" >&2
-			exit "$install_rc"
-		fi
+	apk_installed_version honk "$honk_version" && apk_installed_version luci-app-honk "$luci_version" || {
+		echo "apk 安装失败：目标版本未全部装入（退出码 $install_rc）。" >&2
+		exit 1
+	}
+	if [ "$install_rc" -ne 0 ] && printf '%s\n' "$install_output" | grep -q '^ERROR:'; then
+		echo "apk 安装脚本或依赖报错（退出码 $install_rc），请检查上方错误。" >&2
+		exit "$install_rc"
 	fi
 	[ -x /usr/bin/honk-core ] && /usr/bin/honk-core --version >/dev/null 2>&1 &&
 		[ -x /etc/init.d/honk ] && [ -x /usr/libexec/rpcd/honk ] &&
 		[ -s /usr/share/doona/index.html ] &&
 		[ -s /www/luci-static/resources/view/honk/overview.js ] &&
-		jsonfilter -i /usr/share/rpcd/acl.d/luci-app-honk.json -e '@' >/dev/null 2>&1 &&
+		jsonfilter -i /usr/share/rpcd/acl.d/luci-app-honk-admin.json -e '@' >/dev/null 2>&1 &&
 		jsonfilter -i /usr/share/luci/menu.d/luci-app-honk.json -e '@' >/dev/null 2>&1 || {
 			echo "安装后 Honk 或 LuCI 关键文件缺失或无效。" >&2
 			exit 1
 		}
 	geodata_installed || { echo "安装后缺少 v2ray-geoip/geosite 数据。" >&2; exit 1; }
-	if [ "$PM" = apk ] && [ "$install_rc" -ne 0 ]; then
+	if [ "$install_rc" -ne 0 ]; then
 		echo "目标包已核对安装完成；但 apk 仍报告 $install_rc 个错误，请另行检查设备的包管理器状态。" >&2
 	fi
 

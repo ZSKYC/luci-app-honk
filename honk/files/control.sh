@@ -7,11 +7,14 @@ HONK_CORE=/usr/bin/honk-core
 HONK_MAINT_DIR=/etc/.honk-maintenance
 HONK_MAINT_JOURNAL=$HONK_MAINT_DIR/journal
 HONK_MAINT_CAP_FILE=$HONK_MAINT_DIR/capability
+HONK_UI_DIR=/usr/share/doona
+HONK_UI_FALLBACK=/usr/share/honk/ui
 
 . /lib/functions.sh
 . /usr/share/honk/lock.sh
 . /usr/share/honk/lifecycle.sh
 . /usr/share/honk/firewall.sh
+. /usr/share/honk/kernel.sh
 
 fail() {
 	echo "honk: $*" >&2
@@ -53,6 +56,40 @@ system_config_readonly() {
 	[ "$permissions" = '-r--r--r--' ]
 }
 
+# The core serves the panel from the directory named in the system config and
+# refuses to start when that directory has no index.html. The panel assets
+# therefore may not be a hard requirement of the service: when they are gone
+# the fallback page that ships with this package takes over.
+honk_ui_path() {
+	if [ -r "$HONK_UI_DIR/index.html" ]; then
+		printf '%s\n' "$HONK_UI_DIR"
+	else
+		printf '%s\n' "$HONK_UI_FALLBACK"
+	fi
+}
+
+# Rewrite a stale ui path before the core is started. Without it a panel that
+# was removed after the config was written would keep the core from starting.
+sync_ui_path() {
+	want_ui=$(honk_ui_path)
+	current_ui=$(sed -n "s/^[[:space:]]*ui:[[:space:]]*'\([^']*\)'.*/\1/p" /etc/honk/system.dae 2>/dev/null | head -n 1)
+	[ -n "$current_ui" ] || return 0
+	[ "$current_ui" = "$want_ui" ] && return 0
+	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || return 0
+	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
+	temp_ui=$(mktemp /etc/honk/.system.dae.ui.XXXXXX) || return 1
+	sed "s|^[[:space:]]*ui:[[:space:]]*'[^']*'.*|        ui: '$want_ui'|" /etc/honk/system.dae > "$temp_ui" ||
+		{ rm -f "$temp_ui"; return 1; }
+	chmod 0444 "$temp_ui" || { rm -f "$temp_ui"; return 1; }
+	[ "$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')" = "$current_hash" ] || {
+		rm -f "$temp_ui"
+		fail "system config changed concurrently; refusing ui path sync"
+		return 1
+	}
+	mv -f "$temp_ui" /etc/honk/system.dae || { rm -f "$temp_ui"; return 1; }
+	logger -t honk "panel assets unavailable; serving the fallback page instead"
+}
+
 no_honk_resources() {
 	for link in dae0 dae0peer; do
 		ip link show "$link" >/dev/null 2>&1 && { fail "$link already exists"; return 1; }
@@ -77,6 +114,10 @@ check_network() {
 	valid_network_name || { fail "lan_network contains invalid characters"; return 1; }
 	command -v ubus >/dev/null 2>&1 || { fail "ubus unavailable for network validation"; return 1; }
 	ubus call "network.interface.$lan_network" status >/dev/null 2>&1 || { fail "configured LAN network does not exist in netifd"; return 1; }
+	# The management api is reachable on the lan zone only: a lan network that
+	# lives in the wan zone could never reach the panel.
+	fw_zone=$(honk_firewall_network_zone "$lan_network" 2>/dev/null) || fw_zone=
+	[ "$fw_zone" != wan ] || { fail "the LAN network must not belong to the wan zone"; return 1; }
 }
 
 check_config() {
@@ -84,7 +125,9 @@ check_config() {
 	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { fail "main config must be a regular file"; return 1; }
 	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { fail "system config must be a regular file"; return 1; }
 	system_config_readonly || { fail "system config must be read-only (0444)"; return 1; }
-	[ -r /usr/share/doona/index.html ] || { fail "Doona UI index.html unavailable"; return 1; }
+	# The panel assets are optional: the fallback page ships with this package,
+	# so a missing panel never keeps the service from starting.
+	[ -d "$HONK_UI_FALLBACK" ] || { fail "ui fallback page unavailable"; return 1; }
 	case "$listen_port" in
 		''|*[!0-9]*) fail "listen_port must be numeric"; return 1 ;;
 	esac
@@ -208,6 +251,9 @@ prepare_runtime() {
 	done
 	mkdir -p /etc/honk/state || { fail "cannot create persistent state directory"; return 1; }
 	chmod 0700 /etc/honk/state || return 1
+	# The core reads the ui path from the system config and refuses to start
+	# when it points at a directory without an index.html.
+	sync_ui_path || return 1
 }
 
 valid_username() {
@@ -218,14 +264,29 @@ valid_username() {
 }
 
 valid_password() {
+	# The core accepts 8..128 Unicode scalars and at most 512 bytes. Counting
+	# the scalars locally keeps a password that the core would reject from
+	# failing later with an opaque error.
 	password_bytes=$(printf '%s' "$1" | wc -c)
-	[ "$password_bytes" -ge 8 ] && [ "$password_bytes" -le 512 ]
+	[ "$password_bytes" -le 512 ] || return 1
+	# Dropping the UTF-8 continuation bytes (0x80-0xbf) leaves one byte per
+	# scalar; the fallback is the byte count, which only rejects passwords the
+	# core would reject as well.
+	password_chars=$(printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' 2>/dev/null | LC_ALL=C wc -c)
+	case "$password_chars" in
+		''|*[!0-9]*) password_chars=$password_bytes ;;
+	esac
+	[ "$password_chars" -ge 8 ] && [ "$password_chars" -le 128 ]
 }
 
 read_credentials() {
 	json_file=$(mktemp /tmp/honk-credentials.XXXXXX) || return 1
 	chmod 0600 "$json_file" || { rm -f "$json_file"; return 1; }
-	cat > "$json_file" || { rm -f "$json_file"; return 1; }
+	# Read at most one byte more than the limit: a longer request is rejected
+	# by the size check below, and the extra byte proves it was truncated
+	# rather than merely small. Without the cap the caller can push
+	# unbounded data into the tmpfs before the check ever runs.
+	head -c 2049 > "$json_file" || { rm -f "$json_file"; return 1; }
 	json_bytes=$(wc -c < "$json_file")
 	[ "$json_bytes" -le 2048 ] || { rm -f "$json_file"; return 1; }
 	grep -Fq '\u0000' "$json_file" && { rm -f "$json_file"; return 1; }
@@ -308,14 +369,16 @@ write_runtime_system() {
 	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
 	[ "$current_hash" = "$system_written_hash" ] || { fail "system config changed concurrently; refusing runtime config write"; return 1; }
 	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
+	ui_path=$(honk_ui_path)
 	{
 		printf "global {\n    wan_interface: auto\n    lan_interface: '%s'\n" "$lan_device"
 		printf "    log_level: info\n    dial_mode: domain\n    allow_insecure: false\n"
 		printf "    auto_config_kernel_parameter: true\n    data_dir: '/etc/honk'\n"
+		printf "    bootstrap_resolver: '127.0.0.1:53'\n"
 		printf "    store_subscribe: true\n    nfqueue_enable: true\n}\n\n"
 		printf "experimental {\n    native_api {\n        enabled: true\n        listen: '%s:%s'\n" "$system_listen" "$system_port"
 		printf "        password_auth: true\n        allow_anonymous_loopback: false\n"
-		printf "        config_write: true\n        ui: '/usr/share/doona'\n    }\n}\n"
+		printf "        config_write: true\n        ui: '%s'\n    }\n}\n" "$ui_path"
 	} > "$temp_system" || { rm -f "$temp_system"; return 1; }
 	chmod 0444 "$temp_system" || { rm -f "$temp_system"; return 1; }
 	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
@@ -495,6 +558,9 @@ diagnose() {
 	check_network >/dev/null 2>&1 || errors="$errors lan_network_unavailable"
 	network_settings >/dev/null 2>&1 || errors="$errors lan_ipv4_unavailable"
 	check_kernel >/dev/null 2>&1 || errors="$errors kernel_requirements_unmet"
+	# Not a start blocker: without the kernel function tracer the core still
+	# proxies TCP, it just cannot hook the UDP receive path.
+	honk_kernel_tracer_available || errors="$errors udp_trace_unavailable"
 	command -v curl >/dev/null 2>&1 || errors="$errors curl_missing"
 	if [ "$running" != 1 ]; then
 		no_honk_resources >/dev/null 2>&1 || errors="$errors honk_resources_occupied"
@@ -561,11 +627,11 @@ repair() {
 		check_port || { echo '{"ok":false,"message":"listen_port_occupied"}'; return 1; }
 	fi
 	if [ "$initialized" = 1 ]; then system_host=0.0.0.0; else system_host=127.0.0.1; fi
-	if [ -r /usr/share/doona/index.html ] && [ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] && system_config_readonly && \
+	if [ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] && system_config_readonly && \
 		grep -Fqx '    wan_interface: auto' /etc/honk/system.dae && grep -Fqx "    lan_interface: '$lan_device'" /etc/honk/system.dae && \
 		grep -Fqx "    data_dir: '/etc/honk'" /etc/honk/system.dae && grep -Fqx '    nfqueue_enable: true' /etc/honk/system.dae && \
 		grep -Fqx "        listen: '$system_host:$listen_port'" /etc/honk/system.dae && \
-		grep -Fqx "        ui: '/usr/share/doona'" /etc/honk/system.dae && grep -Fqx '        password_auth: true' /etc/honk/system.dae && \
+		grep -Fqx "        ui: '$(honk_ui_path)'" /etc/honk/system.dae && grep -Fqx '        password_auth: true' /etc/honk/system.dae && \
 		grep -Fqx '        allow_anonymous_loopback: false' /etc/honk/system.dae && grep -Fqx '        config_write: true' /etc/honk/system.dae; then
 		echo '{"ok":true,"message":"system_config_healthy"}'
 		return 0
@@ -574,7 +640,6 @@ repair() {
 		echo '{"ok":false,"message":"system_config_not_regular_file"}'
 		return 1
 	fi
-	[ -r /usr/share/doona/index.html ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
 	umask 077
 	repair_dir=$(mktemp -d /tmp/honk-repair.XXXXXX) || { echo '{"ok":false,"message":"temporary_storage_unavailable"}'; return 1; }
 	old_system=$repair_dir/system.dae
@@ -624,7 +689,14 @@ repair() {
 	honk_firewall_apply "$listen_port" || logger -t honk "native api firewall rule not applied for port $listen_port"
 	system_written_hash=""
 	rm -rf "$repair_dir"
-	echo '{"ok":true,"message":"system_config_repaired"}'
+	if honk_kernel_tracer_available; then
+		echo '{"ok":true,"message":"system_config_repaired"}'
+	else
+		# The repair cannot fix a kernel without the function tracer, so it
+		# is reported instead of being silently swallowed.
+		logger -t honk "kernel function tracer unavailable; UDP traffic is not proxied"
+		echo '{"ok":true,"message":"system_config_repaired","warning":"udp_trace_unavailable"}'
+	fi
 }
 
 api_discovery() {
@@ -689,7 +761,7 @@ initialize_preflight() {
 	load_settings
 	[ "$enabled" = 0 ] && [ "$initialized" = 0 ] || { echo '{"ok":false,"message":"disable_service_before_initialization"}'; return 1; }
 	[ "$config_file" = /etc/honk/config.dae ] || { echo '{"ok":false,"message":"invalid_config_path"}'; return 1; }
-	[ -r /usr/share/doona/index.html ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
+	[ -r "$HONK_UI_FALLBACK/index.html" ] || { echo '{"ok":false,"message":"ui_assets_missing"}'; return 1; }
 	if [ "$1" = read_credentials ]; then
 		read_credentials || { echo '{"ok":false,"message":"invalid_credentials"}'; return 1; }
 	fi

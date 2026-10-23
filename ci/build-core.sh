@@ -41,6 +41,19 @@ declare -A ZIG_TARGETS=(
 	[armv7]="arm-linux-musleabihf"
 )
 
+# Every architecture this script can build has to be in the maps below. An
+# unknown name would otherwise produce an empty rust target and fail much
+# later with a linker error that says nothing about the mapping.
+for a in $CORE_ARCHS; do
+	case "$a" in
+		x86_64|aarch64|armv7) ;;
+		*)
+			echo "Unsupported core architecture: $a" >&2
+			exit 1
+			;;
+	esac
+done
+
 rm -rf "$WORK_DIR/source"
 git clone --quiet "$CORE_REPOSITORY" "$WORK_DIR/source"
 git -C "$WORK_DIR/source" checkout --quiet "$CORE_COMMIT"
@@ -117,13 +130,20 @@ STAGE_MK="$ROOT/honk/generated-stage.mk"
 # aya 0.14.0 exhaustively destructures libc::timespec, which breaks when
 # musl32_time64 changes the struct layout on 32-bit targets (extra padding
 # fields). One-line fix to the vendored source; harmless on 64-bit.
-if ! cargo +"$TOOLCHAIN" fetch --locked --target x86_64-unknown-linux-musl >/dev/null 2>&1; then
-	echo "warning: cargo fetch failed; vendored-source patches below may be skipped" >&2
+if ! cargo +"$TOOLCHAIN" fetch --locked --target x86_64-unknown-linux-musl; then
+	echo "cargo fetch failed; the vendored aya patch cannot be applied" >&2
+	exit 1
 fi
-for aya_utils in "$CARGO_HOME"/registry/src/*/aya-0.14.0/src/programs/utils.rs; do
-	[ -f "$aya_utils" ] || continue
-	sed -i 's/let libc::timespec { tv_sec, tv_nsec } = time;/let libc::timespec { tv_sec, tv_nsec, .. } = time;/' "$aya_utils"
-done
+aya_utils=$(ls "$CARGO_HOME"/registry/src/*/aya-0.14.0/src/programs/utils.rs 2>/dev/null | head -n 1)
+if [ -z "$aya_utils" ]; then
+	echo "aya 0.14.0 sources not found under $CARGO_HOME/registry/src; the patch has to be updated" >&2
+	exit 1
+fi
+sed -i 's/let libc::timespec { tv_sec, tv_nsec } = time;/let libc::timespec { tv_sec, tv_nsec, .. } = time;/' "$aya_utils"
+grep -q 'tv_sec, tv_nsec, \.\.' "$aya_utils" || {
+	echo "the aya timespec patch did not apply to $aya_utils" >&2
+	exit 1
+}
 
 # honk-core's monotonic_nanos() builds libc::timespec with a struct literal,
 # which breaks on 32-bit musl with musl32_time64 (private __pad0 field), and

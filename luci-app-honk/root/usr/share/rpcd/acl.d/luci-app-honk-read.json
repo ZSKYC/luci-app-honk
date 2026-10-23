@@ -1,0 +1,24 @@
+{
+	"luci-app-honk-read": {
+		"description": "Grant read-only access to the Honk status, logs and package information",
+		"read": {
+			"ubus": {
+				"honk": [ "status", "check", "job_status", "logs", "update_check" ],
+				"network": [ "get_proto_handlers" ],
+				"network.interface": [ "dump" ]
+			},
+			"file": {
+				"/tmp/honk-runtime/backup.tar.gz": [ "read" ],
+				"/usr/share/v2ray/geoip.dat": [ "read" ],
+				"/usr/share/v2ray/geosite.dat": [ "read" ],
+				"/tmp/honk-runtime/geoip.log": [ "read" ],
+				"/tmp/honk-runtime/geosite.log": [ "read" ],
+				"/tmp/honk-runtime/pkg-honk.log": [ "read" ],
+				"/tmp/honk-runtime/pkg-luci-app-honk.log": [ "read" ],
+				"/usr/share/luci-app-honk/pkg-info.sh honk": [ "exec" ],
+				"/usr/share/luci-app-honk/pkg-info.sh luci-app-honk": [ "exec" ]
+			},
+			"uci": [ "network", "honk" ]
+		}
+	}
+}

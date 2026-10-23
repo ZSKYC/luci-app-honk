@@ -27,7 +27,7 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -77,13 +77,30 @@ jobs:
           # these commits, so the check runs API is the only usable source.
           # A re-run of a lane produces a second entry under the same name;
           # the highest id is the current verdict for that lane.
-          REQUIRED_LANES='changes|docs|fmt + clippy|cargo nextest (workspace)|cargo nextest (aarch64)|DNS smoke (release honk-core)|dae-config parser (conformance + fuzz replay)|eBPF feature compile guard|eBPF object + real VM kernel tests|eBPF real VM tests (recent kernel)|Independent feature sets|x86_64 musl release path'
+          #
+          # The lane list lives in ci/pins.env so an upstream lane rename is a
+          # one-line change there instead of a workflow edit. A renamed lane
+          # shows up as "missing" and fails the gate loudly instead of
+          # silently promoting an older commit.
+          REQUIRED_LANES="$UPSTREAM_REQUIRED_LANES"
+          LOOKBACK="$UPSTREAM_LOOKBACK"
 
+          # Reads the check runs of one commit into a file.
+          # Returns non-zero when the API call itself failed: an API error is
+          # not the same thing as "this lane did not pass", and treating the
+          # two alike would silently promote an older commit.
           lane_verdict() {
-            local repo=$1 sha=$2
-            gh api "repos/$repo/commits/$sha/check-runs?per_page=100" \
-              --jq '.check_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion)"' 2>/dev/null ||
-              printf ''
+            local repo=$1 sha=$2 out=$3
+            if ! gh api "repos/$repo/commits/$sha/check-runs?per_page=100" \
+              --jq '.check_runs[] | "\(.id)\t\(.name)\t\(.status)\t\(.conclusion)"' \
+              > "$out" 2>"$out.err"; then
+              echo "::error::cannot read check runs for $repo@$sha" >&2
+              sed -n '1,5p' "$out.err" >&2 || true
+              rm -f "$out" "$out.err"
+              return 1
+            fi
+            rm -f "$out.err"
+            return 0
           }
 
           # Prints the commit when every required lane completed successfully.
@@ -98,10 +115,15 @@ jobs:
             local repo=$1 sha=$2 id name status conclusion lane
             local seen
             seen="$(mktemp)"
+            if ! lane_verdict "$repo" "$sha" "$seen.raw"; then
+              rm -f "$seen" "$seen.raw" "$seen.raw.err"
+              return 2
+            fi
             while IFS=$'\t' read -r id name status conclusion; do
               [ -n "$name" ] || continue
               printf '%s\t%s\t%s\n' "$name" "$id" "$status $conclusion" >> "$seen"
-            done < <(lane_verdict "$repo" "$sha")
+            done < "$seen.raw"
+            rm -f "$seen.raw"
             local ok=0
             while IFS= read -r lane; do
               [ -n "$lane" ] || continue
@@ -122,16 +144,33 @@ jobs:
           # Walk back from the branch head until a proven-good commit is
           # found. The head itself is the usual answer; the walk-back only
           # matters while upstream's newest commit is still being tested.
+          #
+          # The walk is bounded by UPSTREAM_LOOKBACK commits. When the whole
+          # window is red the run fails; it never falls back to an arbitrarily
+          # old commit just to have something to build.
           latest_green_commit() {
-            local repo=$1 branch=$2 sha
-            for sha in $(gh api "repos/$repo/commits?sha=$branch&per_page=10" --jq '.[].sha'); do
+            local repo=$1 branch=$2 sha status
+            local checked=0
+            for sha in $(gh api "repos/$repo/commits?sha=$branch&per_page=$LOOKBACK" --jq '.[].sha'); do
+              checked=$((checked + 1))
               # Diagnostics go to stderr: stdout carries the commit alone.
               echo "  checking $sha" >&2
-              if is_green "$repo" "$sha"; then
+              status=0
+              is_green "$repo" "$sha" || status=$?
+              if [ "$status" -eq 2 ]; then
+                echo "::error::upstream check-run API failed while checking $sha" >&2
+                return 2
+              fi
+              if [ "$status" -eq 0 ]; then
                 printf '%s\n' "$sha"
                 return 0
               fi
             done
+            if [ "$checked" -eq 0 ]; then
+              echo "::error::no commits found on $repo/$branch" >&2
+              return 2
+            fi
+            echo "::error::none of the $checked inspected commits on $repo/$branch has a green CI" >&2
             return 1
           }
 
@@ -139,10 +178,16 @@ jobs:
             echo "::error::no doona release found"
             exit 1
           }
-          core_new=$(latest_green_commit daeuniverse/honk main) || {
+          core_status=0
+          core_new=$(latest_green_commit daeuniverse/honk main) || core_status=$?
+          if [ "$core_status" -eq 2 ]; then
+            echo "::error::upstream honk check-run API failed; refusing to pick an older commit"
+            exit 1
+          fi
+          if [ "$core_status" -ne 0 ]; then
             echo "::error::no upstream honk commit with a green CI"
             exit 1
-          }
+          fi
           require_sha "$core_new" core
 
           # The doona trigger is an immutable release tag. The honk trigger
@@ -164,6 +209,14 @@ jobs:
             echo "::error::cannot read doona version from package.json at $doona_new"
             exit 1
           fi
+          # The version is written into ci/pins.env and later interpolated into
+          # shell and sed expressions, so it must be a plain version string.
+          # Anything else (shell metacharacters, newlines, quotes) is rejected
+          # instead of being pasted into a command.
+          if ! printf '%s' "$doona_version_new" | grep -qE '^[0-9A-Za-z][0-9A-Za-z._+-]*$'; then
+            echo "::error::doona version at $doona_new is not a plain version string: ${doona_version_new}"
+            exit 1
+          fi
 
           changes=""
           if [ "$core_new" != "$CORE_COMMIT" ]; then
@@ -182,7 +235,7 @@ jobs:
             echo "changes=$changes"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         if: steps.detect.outputs.changed == 'true'
         with:
           node-version: '24'
@@ -224,9 +277,10 @@ jobs:
             -e "s/^DOONA_RELEASE=.*/DOONA_RELEASE=$doona_tag/" \
             -e "s/^DOONA_VERSION=.*/DOONA_VERSION=${{ steps.detect.outputs.doona_version_new }}/" \
             ci/pins.env
+          honk_changed=0
           if [ "$core_new" != "$CORE_COMMIT" ]; then
             sed -i "s/^CORE_COMMIT:=.*/CORE_COMMIT:=$core_new/" honk/Makefile
-            bump_package honk/Makefile
+            honk_changed=1
           fi
           if [ "$doona_new" != "$DOONA_COMMIT" ]; then
             provisional="doona-$(printf '%s' "$doona_new" | cut -c1-8)-candidate.tar.gz"
@@ -236,9 +290,18 @@ jobs:
             doona_archive="doona-$(printf '%s' "$doona_new" | cut -c1-8)-$(printf '%s' "$doona_hash" | cut -c1-12).tar.gz"
             mv "artifacts/cache/$provisional" "artifacts/cache/$doona_archive"
             sed -i "s/^DOONA_ARCHIVE=.*/DOONA_ARCHIVE=$doona_archive/" ci/pins.env
-            sed -i -e "s/^PKG_SOURCE:=.*/PKG_SOURCE:=$doona_archive/" \
-              -e "s/^PKG_HASH:=.*/PKG_HASH:=$doona_hash/" luci-app-honk/Makefile
-            bump_package luci-app-honk/Makefile
+            # The Doona assets ship in the honk package, so the archive and its
+            # hash are recorded there.
+            sed -i -e "s/^DOONA_ARCHIVE?=.*/DOONA_ARCHIVE?=$doona_archive/" \
+              -e "s/^DOONA_HASH?=.*/DOONA_HASH?=$doona_hash/" honk/Makefile
+            honk_changed=1
+          fi
+          # One version bump per package: the core and the panel end up in the
+          # same honk package, so bumping it twice would publish two releases
+          # for one upstream change. The LuCI package holds neither, so it
+          # keeps its version.
+          if [ "$honk_changed" = 1 ]; then
+            bump_package honk/Makefile
           fi
           bash scripts/check.sh
 
@@ -304,6 +367,7 @@ jobs:
           release_tag=$(gh release list --limit 100 --json tagName --jq ".[].tagName | select(endswith(\"-r$run_id\"))" | head -1)
           [ -n "$release_tag" ] || { echo "::error::formal release for run $run_id is missing"; exit 1; }
           test "$(gh release view "$release_tag" --json isPrerelease --jq .isPrerelease)" = false
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
 
           {
             echo "## Honk upstream update published"
@@ -314,3 +378,55 @@ jobs:
             echo ""
             echo "Doona, Honk core and all six package architectures passed; main, Release and R2 were updated."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Every run used to leave its `auto-bump-staging-*` branch and its
+      # `source-*` prerelease behind, so the repository accumulated one of
+      # each per day. The staging branch has served its purpose once the
+      # validated commit is on main, and a source prerelease is only needed
+      # while it is the one the newest formal release was built from.
+      - name: Clean up staging branches and stale source prereleases
+        if: success() && steps.detect.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.verify.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          # The formal release manifest names the source prerelease its
+          # packages were built from. Everything else is a leftover.
+          keep_source=''
+          if [ -n "$RELEASE_TAG" ]; then
+            mkdir -p manifest
+            if gh release download "$RELEASE_TAG" --repo "${{ github.repository }}" \
+              --pattern 'release-manifest.json' --dir manifest >/dev/null 2>&1; then
+              keep_source=$(python3 -c '
+          import json, sys
+          print(json.load(open(sys.argv[1])).get("source_tag", ""))
+          ' manifest/release-manifest.json 2>/dev/null || true)
+            fi
+          fi
+
+          # Staging branches: this run's branch plus any left by an earlier
+          # run. The validated commit is on main at this point, so nothing
+          # depends on them any more.
+          mapfile -t branches < <(gh api "repos/${{ github.repository }}/branches" \
+            --paginate --jq '.[].name' | grep '^auto-bump-staging-' || true)
+          for branch in "${branches[@]}"; do
+            [ -n "$branch" ] || continue
+            echo "deleting branch $branch"
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$branch" >/dev/null
+          done
+
+          # Source prereleases: keep the one the current formal release was
+          # built from, drop the rest.
+          mapfile -t sources < <(gh release list --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' | grep '^source-' || true)
+          for tag in "${sources[@]}"; do
+            [ -n "$tag" ] || continue
+            if [ -n "$keep_source" ] && [ "$tag" = "$keep_source" ]; then
+              echo "keeping source prerelease $tag"
+              continue
+            fi
+            echo "deleting source prerelease $tag"
+            gh release delete "$tag" --repo "${{ github.repository }}" --yes --cleanup-tag >/dev/null
+          done

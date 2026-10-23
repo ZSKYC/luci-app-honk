@@ -51,10 +51,10 @@ load_stage_mk() { source <(sed 's/:=/=/' "$1"); }
 # next or the second silently wins.
 load_stage_mk "$ROOT/honk/generated-stage.mk"
 CORE_SOURCE_URL=$PKG_SOURCE_URL
-load_stage_mk "$ROOT/luci-app-honk/generated-doona-stage.mk"
-DOONA_SOURCE_URL=$PKG_SOURCE_URL
-DOONA_HASH=$PKG_HASH
-DOONA_ARCHIVE=${PKG_SOURCE:-}
+load_stage_mk "$ROOT/honk/generated-doona-stage.mk"
+DOONA_SOURCE_URL=$DOONA_SOURCE_URL
+DOONA_HASH=$DOONA_HASH
+DOONA_ARCHIVE=${DOONA_ARCHIVE:-}
 [ -n "$CORE_SOURCE_URL" ] && [ -n "$DOONA_SOURCE_URL" ] && [ -n "$DOONA_HASH" ] &&
 	[ -n "$DOONA_ARCHIVE" ] || {
 	echo "generated stage files are incomplete" >&2
@@ -263,18 +263,21 @@ write_metadata() { # <stage-dir> <pkg> <conffiles-newline-list>
 # --- staging ---------------------------------------------------------------
 # scripts/check.sh asserts that every $(1)/... install target named in the
 # Makefiles is staged here, so the two file lists cannot drift apart.
-stage_luci() { # <stage-dir>
+# The Doona panel ships in the honk package: the core serves it from
+# /usr/share/doona, so the service must not depend on the arch-independent
+# LuCI package being installed.
+stage_doona() { # <stage-dir>
 	local idir=$1 work="$DL_DIR/doona" f
-	mkdir -p "$work" "$idir/usr/share/doona" \
+	mkdir -p "$idir/usr/share/doona" \
 		"$idir/usr/share/licenses/honk-doona/LICENSES"
 	fetch_verified "${DOONA_SOURCE_URL%/}/$DOONA_ARCHIVE" "$DOONA_HASH" \
 		"$DL_DIR/$DOONA_ARCHIVE"
 	rm -rf "$work"
 	mkdir -p "$work"
 	tar --strip-components=1 -C "$work" -xzf "$DL_DIR/$DOONA_ARCHIVE"
-	cp -pR "$work/." "$idir/usr/share/doona/"
-	edit_file "$idir/usr/share/doona/SOURCE" \
+	edit_file "$work/SOURCE" \
 		's#^Build patch: .*#Build patch: '"$DOONA_PATCH"'#'
+	cp -pR "$work/." "$idir/usr/share/doona/"
 	for f in LICENSE NOTICE THIRD-PARTY-NOTICES.txt; do
 		[ -f "$idir/usr/share/doona/$f" ] || continue
 		install -m 0644 "$idir/usr/share/doona/$f" \
@@ -283,7 +286,10 @@ stage_luci() { # <stage-dir>
 	[ -d "$idir/usr/share/doona/LICENSES" ] &&
 		cp -pR "$idir/usr/share/doona/LICENSES/." \
 			"$idir/usr/share/licenses/honk-doona/LICENSES/"
+}
 
+stage_luci() { # <stage-dir>
+	local idir=$1
 	install -d -m 0755 "$idir/usr/libexec/rpcd"
 	install -m 0755 "$ROOT/luci-app-honk/root/usr/libexec/rpcd/honk" \
 		"$idir/usr/libexec/rpcd/honk"
@@ -302,8 +308,10 @@ stage_luci() { # <stage-dir>
 	install -m 0644 "$ROOT/luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json" \
 		"$idir/usr/share/luci/menu.d/luci-app-honk.json"
 	install -d -m 0755 "$idir/usr/share/rpcd/acl.d"
-	install -m 0644 "$ROOT/luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json" \
-		"$idir/usr/share/rpcd/acl.d/luci-app-honk.json"
+	install -m 0644 "$ROOT/luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-read.json" \
+		"$idir/usr/share/rpcd/acl.d/luci-app-honk-read.json"
+	install -m 0644 "$ROOT/luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk-admin.json" \
+		"$idir/usr/share/rpcd/acl.d/luci-app-honk-admin.json"
 	install -d -m 0755 "$idir/www/luci-static/resources/view/honk"
 	install -m 0644 "$ROOT"/luci-app-honk/htdocs/luci-static/resources/view/honk/*.js \
 		"$idir/www/luci-static/resources/view/honk/"
@@ -326,6 +334,8 @@ stage_honk() { # <stage-dir> <arch>
 	tar --strip-components=1 -C "$work" -xzf "$DL_DIR/$asset"
 	test -x "$work/honk-core" || { echo "$asset has no honk-core binary" >&2; exit 1; }
 
+	stage_doona "$idir"
+
 	install -d -m 0755 "$idir/usr/bin"
 	install -m 0755 "$work/honk-core" "$idir/usr/bin/honk-core"
 	install -d -m 0755 "$idir/usr/share/licenses/honk"
@@ -346,20 +356,32 @@ stage_honk() { # <stage-dir> <arch>
 
 	install -d -m 0755 "$idir/usr/share/honk"
 	install -m 0644 "$ROOT/honk/files/config.dae" "$idir/usr/share/honk/default-config.dae"
-	install -m 0644 "$ROOT/honk/generated-provenance.json" \
-		"$idir/usr/share/honk/provenance.json"
+	# The provenance file is written by the release build; a local build
+	# without it still gets a package, marked as such.
+	if [ -f "$ROOT/honk/generated-provenance.json" ]; then
+		install -m 0644 "$ROOT/honk/generated-provenance.json" \
+			"$idir/usr/share/honk/provenance.json"
+	else
+		printf '%s\n' '{"source":"local-build"}' > "$idir/usr/share/honk/provenance.json"
+		chmod 0644 "$idir/usr/share/honk/provenance.json"
+	fi
 	# Listed one by one, not in a loop: scripts/check.sh verifies every
 	# Makefile install target appears here, which a loop would hide.
 	install -m 0755 "$ROOT/honk/files/control.sh" "$idir/usr/share/honk/control.sh"
 	install -m 0755 "$ROOT/honk/files/lock.sh" "$idir/usr/share/honk/lock.sh"
 	install -m 0755 "$ROOT/honk/files/firewall.sh" "$idir/usr/share/honk/firewall.sh"
+	install -m 0755 "$ROOT/honk/files/kernel.sh" "$idir/usr/share/honk/kernel.sh"
 	install -m 0755 "$ROOT/honk/files/lifecycle.sh" "$idir/usr/share/honk/lifecycle.sh"
+	install -m 0755 "$ROOT/honk/files/runtime-dir.sh" "$idir/usr/share/honk/runtime-dir.sh"
 	install -m 0755 "$ROOT/honk/files/maintenance.sh" "$idir/usr/share/honk/maintenance.sh"
 	install -m 0755 "$ROOT/honk/files/job.sh" "$idir/usr/share/honk/job.sh"
 	install -m 0755 "$ROOT/honk/files/update.sh" "$idir/usr/share/honk/update.sh"
 	install -m 0755 "$ROOT/honk/files/redact-log.sh" "$idir/usr/share/honk/redact-log.sh"
 	install -m 0755 "$ROOT/honk/files/log-level-filter.sh" "$idir/usr/share/honk/log-level-filter.sh"
 	install -m 0644 "$ROOT/honk/files/log-lines.sh" "$idir/usr/share/honk/log-lines.sh"
+	# The fallback panel, served by the core when the Doona assets are gone.
+	install -d -m 0755 "$idir/usr/share/honk/ui"
+	install -m 0644 "$ROOT/honk/files/ui/index.html" "$idir/usr/share/honk/ui/index.html"
 }
 
 # Catch the metadata defects that only surface at `apk add` time on the device:
@@ -510,6 +532,15 @@ for arch in $OPENWRT_ARCHS; do
 done
 
 if [ "$DRY_RUN" != 1 ]; then
+	# One index per architecture: the feed is addressed per architecture, and
+	# a directory whose index also lists the other architectures' packages
+	# makes apk offer a package the device cannot use. The arch-independent
+	# LuCI package belongs in every one of them.
+	for arch in $OPENWRT_ARCHS; do
+		(cd "$OUT_ROOT" && apk mkndx --sign-key "$SEC_KEY" --allow-untrusted \
+			--output "$arch/packages.adb" "$arch"/honk-*.apk \
+			luci-app-honk-*.apk)
+	done
 	(cd "$OUT_ROOT" && find . -name '*.apk' -print0 |
 		xargs -0 apk mkndx --sign-key "$SEC_KEY" --allow-untrusted \
 			--output packages.adb)

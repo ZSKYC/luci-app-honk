@@ -39,12 +39,5 @@
 			"type": "alias",
 			"path": "admin/services/honk/overview"
 		}
-	},
-	"admin/services/honk/settings": {
-		"hidden": true,
-		"action": {
-			"type": "alias",
-			"path": "admin/services/honk/overview"
-		}
 	}
 }

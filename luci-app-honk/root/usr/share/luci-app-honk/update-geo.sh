@@ -5,6 +5,11 @@
 # in /tmp prevents concurrent runs.
 
 TYPE="$1"
+# The log and the lock live in a private runtime directory: their paths are
+# predictable, so a world writable /tmp could hold a symlink planted by
+# another user, which a root script would then write through.
+. /usr/share/honk/runtime-dir.sh || { echo "runtime directory unavailable" >&2; exit 1; }
+honk_runtime_dir || { echo "runtime directory unavailable" >&2; exit 1; }
 # Default source: Loyalsoldier/v2ray-rules-dat — daily-built, China-optimized,
 # ships both geoip.dat and geosite.dat. Users can override per-type via
 # honk.main.geoip_url / geosite_url (empty falls back to the default below).
@@ -26,8 +31,8 @@ case "$TYPE" in
 esac
 [ -n "$URL" ] || URL="$DEF_URL"
 
-LOCK="/tmp/luci-app-honk.${TYPE}.lock"
-LOG="/tmp/luci-app-honk.${TYPE}.log"
+LOCK="$HONK_RUNTIME_DIR/${TYPE}.lock"
+LOG="$HONK_RUNTIME_DIR/${TYPE}.log"
 
 schedule_backend_reload() {
 	if /bin/pidof honk-core >/dev/null 2>&1; then
@@ -60,6 +65,9 @@ fi
 
 # Spawn detached worker — parent returns immediately to LuCI.
 (
+	# The log is created without following a symlink and stays readable by
+	# root only.
+	honk_runtime_prepare "${TYPE}.log" || exit 1
 	exec >"$LOG" 2>&1
 	trap 'rm -f "$LOCK"' EXIT INT TERM
 

@@ -23,14 +23,19 @@ case "$0" in
 		;;
 esac
 
-LOCK="/tmp/luci-app-honk.pkg-${PKG}.lock"
-LOG="/tmp/luci-app-honk.pkg-${PKG}.log"
+LOCK="$HONK_RUNTIME_DIR/pkg-${PKG}.lock"
+LOG="$HONK_RUNTIME_DIR/pkg-${PKG}.log"
 
 # The lifecycle helper reports whether the core runs and owns its api
 # listener; the upgrade check needs it before and after the package change.
 if [ -r /usr/share/honk/lifecycle.sh ]; then
 	. /usr/share/honk/lifecycle.sh
 fi
+# The lock and the log live in a private runtime directory: their paths are
+# predictable, so a world writable /tmp could hold a symlink planted by
+# another user, which a root script would then write through.
+. /usr/share/honk/runtime-dir.sh || { echo "runtime directory unavailable" >&2; exit 1; }
+honk_runtime_dir || { echo "runtime directory unavailable" >&2; exit 1; }
 
 # The installed version of the named package, empty when it is not installed.
 installed_version() {
@@ -87,6 +92,9 @@ if ! ( set -C; echo "$$" >"$LOCK" ) 2>/dev/null; then
 fi
 
 (
+	# The log is created without following a symlink and stays readable by
+	# root only.
+	honk_runtime_prepare "pkg-${PKG}.log" || exit 1
 	exec >"$LOG" 2>&1
 	trap 'rm -f "$LOCK"; [ "${0#/tmp/.honk-upd-}" != "$0" ] && rm -f "$0"' EXIT INT TERM
 
@@ -115,7 +123,7 @@ fi
 			echo "--- apk add $constraint ---"
 			apk add "$constraint" 2>&1
 			exit 0
-		) 9>/tmp/luci-app-honk.apk.lock
+		) 9>"$HONK_RUNTIME_DIR/apk.lock"
 		rc=$?
 		after_version=$(installed_version)
 		pkg_result=

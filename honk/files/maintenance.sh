@@ -10,8 +10,8 @@ HONK_SYSTEM=$HONK_ROOT/system.dae
 HONK_STATE=$HONK_ROOT/state/honk.db
 HONK_CORE=/usr/bin/honk-core
 IMPORT_PREVIEW_ROOT=/tmp/honk-v2-import
-BACKUP=/tmp/honk-backup.tar.gz
-RESTORE=/tmp/honk-maintenance/restore.tar.gz
+BACKUP=/tmp/honk-runtime/backup.tar.gz
+RESTORE=/tmp/honk-runtime/restore.tar.gz
 LOCK_DIR=/run/honk.lock
 TXN_DIR=/etc/.honk-maintenance
 JOURNAL=$TXN_DIR/journal
@@ -20,13 +20,27 @@ MAX_EXPANDED=134217728
 MAX_FILE=67108864
 MAX_FILES=512
 CAPABILITY=$TXN_DIR/capability
+HONK_UI_DIR=/usr/share/doona
+HONK_UI_FALLBACK=/usr/share/honk/ui
 
 if [ "${HONK_MAINT_LIBRARY:-0}" != 1 ]; then
 	. /usr/share/honk/lock.sh || exit 1
 	. /usr/share/honk/lifecycle.sh || exit 1
 	. /usr/share/honk/firewall.sh || exit 1
+	. /usr/share/honk/runtime-dir.sh || exit 1
 	. /usr/share/libubox/jshn.sh || exit 1
 fi
+
+# The core serves the panel from the directory named in the system config and
+# refuses to start when it has no index.html, so the panel assets may not be a
+# hard requirement: the fallback page ships with the core package.
+honk_ui_path() {
+	if [ -r "$HONK_UI_DIR/index.html" ]; then
+		printf '%s\n' "$HONK_UI_DIR"
+	else
+		printf '%s\n' "$HONK_UI_FALLBACK"
+	fi
+}
 
 json_result() {
 	json_ok=0
@@ -334,6 +348,10 @@ cleanup() {
 	cleanup_status=$?
 	cleanup_safe=1
 	if [ -n "$mock_pid" ] && ! stop_mock; then cleanup_safe=0; fi
+	# The uploaded archive carries the user's configuration and is not needed
+	# any more: it is removed on every path so that it does not stay behind in
+	# a temporary file.
+	rm -f "$RESTORE" 2>/dev/null || :
 	if [ "$cleanup_safe" = 1 ]; then
 		[ ! -e "$CAPABILITY" ] || rm -f "$CAPABILITY"
 		if [ "$journal_active" = 1 ]; then
@@ -529,6 +547,11 @@ is_excluded() {
 	case "$1" in
 		*/logs/*|logs/*|*/log/*|log/*|*.log|*.tmp|*.pid|*.lock|*/.lock|*/honk.db-wal|*/honk.db-shm|*/honk.db-journal)
 			return 0 ;;
+		# The update trust anchor belongs to the device configuration, not to
+		# the user data: a backup must not carry it away and a restore must
+		# not be able to replace it.
+		*/update-trust/*|update-trust/*)
+			return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -550,14 +573,14 @@ collect_tree() {
 	while IFS= read -r collect_path; do
 		collect_path=${collect_path#./}
 		is_excluded "$collect_path" && continue
-		safe_relpath "$collect_path" || exit 1
+		safe_relpath "$collect_path" || return 1
 		[ -f "$collect_root/$collect_path" ] && [ ! -L "$collect_root/$collect_path" ] || return 1
 		collect_size=$(size_of "$collect_root/$collect_path") || return 1
 		[ "$collect_size" -le "$MAX_FILE" ] || return 1
 		collect_count=$((collect_count + 1))
 		collect_total=$((collect_total + collect_size))
 		[ "$collect_count" -lt "$MAX_FILES" ] && [ "$collect_total" -le $((MAX_EXPANDED - 1048576)) ] || return 1
-		printf '%s\n' "$collect_path" >> "$collect_out" || exit 1
+		printf '%s\n' "$collect_path" >> "$collect_out" || return 1
 	done < "$collect_out.raw" || return 1
 	[ -f "$collect_root/config.dae" ] && [ -f "$collect_root/system.dae" ] || return 1
 	return 0
@@ -598,9 +621,18 @@ validate_system_schema() {
 	case "$listen_port" in ''|*[!0-9]*) return 1 ;; esac
 	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || return 1
 	[ "$lan_iface" = "$expected_device" ] && [ "$listen_port" = "$expected_port" ] || return 1
-	[ "$listen_host" = "$expected_ip" ] || [ "$listen_host" = 127.0.0.1 ] || return 1
+	[ "$listen_host" = "$expected_ip" ] || [ "$listen_host" = 127.0.0.1 ] || [ "$listen_host" = 0.0.0.0 ] || return 1
 	store_subscribe=$(sed -n 's/^    store_subscribe: \(true\|false\)$/\1/p' "$trusted_system")
 	case "$store_subscribe" in true|false) ;; *) return 1 ;; esac
+	# The ui path is one of the two managed locations: the panel itself or the
+	# fallback page that ships with the core package. Any other value would
+	# make the core serve an arbitrary directory.
+	trusted_ui=$(sed -n "s/^        ui: '\(.*\)'$/\1/p" "$trusted_system" | head -n 1)
+	case "$trusted_ui" in
+		"$HONK_UI_DIR"|"$HONK_UI_FALLBACK") ui_line="        ui: '$trusted_ui'" ;;
+		'') ui_line="" ;;
+		*) return 1 ;;
+	esac
 	cat > "$temp_dir/system.expected" <<EOF
 global {
     wan_interface: auto
@@ -621,11 +653,22 @@ experimental {
         password_auth: true
         allow_anonymous_loopback: false
         config_write: true
-        ui: '/usr/share/doona'
+$ui_line
     }
 }
 EOF
-	cmp -s "$trusted_system" "$temp_dir/system.expected"
+	# The bootstrap resolver was added to the system config after the first
+	# releases, so an archive made before that still has to restore: the
+	# field and the comments around it are compared out. Every other field
+	# has to match the managed template exactly. Blank lines are compared out
+	# as well, because the ui line is optional.
+	normalize_system() {
+		sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*bootstrap_resolver:/d' \
+			-e '/^[[:space:]]*$/d' "$1"
+	}
+	normalize_system "$trusted_system" > "$temp_dir/system.normalized"
+	normalize_system "$temp_dir/system.expected" > "$temp_dir/system.expected.normalized"
+	cmp -s "$temp_dir/system.normalized" "$temp_dir/system.expected.normalized"
 }
 
 check_tar_members() {
@@ -754,7 +797,7 @@ experimental {
         password_auth: true
         allow_anonymous_loopback: false
         config_write: true
-        ui: '/usr/share/doona'
+        ui: '$(honk_ui_path)'
     }
 }
 EOF
@@ -767,7 +810,11 @@ write_live_system() {
 	live_ip=$3
 	live_port=$4
 	live_initialized=$5
-	if [ "$live_initialized" = 1 ]; then live_host=$live_ip; else live_host=127.0.0.1; fi
+	# The native api binds every interface once the package is initialized;
+	# the firewall keeps the port on the lan. The lan address is not written
+	# into the system config, so a later address change cannot strand the
+	# panel on a stale address.
+	if [ "$live_initialized" = 1 ]; then live_host=0.0.0.0; else live_host=127.0.0.1; fi
 	cat > "$live_system" <<EOF
 global {
     wan_interface: auto
@@ -777,6 +824,7 @@ global {
     allow_insecure: false
     auto_config_kernel_parameter: true
     data_dir: '/etc/honk'
+    bootstrap_resolver: '127.0.0.1:53'
     store_subscribe: true
     nfqueue_enable: true
 }
@@ -788,7 +836,7 @@ experimental {
         password_auth: true
         allow_anonymous_loopback: false
         config_write: true
-        ui: '/usr/share/doona'
+        ui: '$(honk_ui_path)'
     }
 }
 EOF
@@ -879,6 +927,7 @@ make_manifest() {
 }
 
 backup() {
+	if ! honk_runtime_dir; then error unsafe_backup_path; return 1; fi
 	if [ -L "$BACKUP" ] || { [ -e "$BACKUP" ] && [ ! -f "$BACKUP" ]; }; then error unsafe_backup_path; return 1; fi
 	if foreign_core_running; then error unmanaged_core_running; return 1; fi
 	if managed_core_pid >/dev/null 2>&1; then old_running=1; fi

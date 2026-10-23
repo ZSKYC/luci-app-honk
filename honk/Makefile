@@ -22,6 +22,15 @@ HONK_HASH_X86_64?=SKIP
 HONK_HASH_AARCH64?=SKIP
 HONK_HASH_ARMV7?=SKIP
 
+# The Doona panel ships in this package. The core serves it from
+# /usr/share/doona, so the service must not depend on the arch-independent
+# LuCI package (which depends on honk) being installed.
+DOONA_ARCHIVE?=doona-6acdabdc-6fb5fec490b6.tar.gz
+DOONA_HASH?=6fb5fec490b6e86604d8ae4b07d872896639d9e1d744adb6fb2394cbe3ef34b3
+DOONA_SOURCE_URL?=https://github.com/szwjp/luci-app-honk/releases/download/staging
+
+-include $(CURDIR)/generated-doona-stage.mk
+
 # ARCH_PACKAGES is the package arch (e.g. arm_cortex-a7_neon-vfpv4);
 # ARCH is the CPU arch (x86_64/aarch64/arm) and coincides for 64-bit.
 ifeq ($(ARCH_PACKAGES),x86_64)
@@ -48,6 +57,16 @@ PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 
 include $(INCLUDE_DIR)/package.mk
 
+# The package has two sources: the core archive (PKG_SOURCE) and the Doona
+# panel. PKG_SOURCE is taken, so the panel gets its own Download target; the
+# STAMP_PREPARED rule then pulls it in before Build/Prepare runs.
+define Download/doona
+  FILE:=$(DOONA_ARCHIVE)
+  URL:=$(DOONA_SOURCE_URL)/$(DOONA_ARCHIVE)
+  HASH:=$(DOONA_HASH)
+endef
+$(eval $(call Download,doona))
+
 define Package/honk
   SECTION:=net
   CATEGORY:=Network
@@ -70,6 +89,15 @@ endef
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(TAR) -xzf $(DL_DIR)/$(PKG_SOURCE) -C $(PKG_BUILD_DIR) --strip-components=1
+	mkdir -p $(PKG_BUILD_DIR)/doona
+	$(TAR) --strip-components=1 -C $(PKG_BUILD_DIR)/doona -xzf $(DL_DIR)/$(DOONA_ARCHIVE)
+	$(SED) 's#^Build patch: .*#Build patch: ci/patches/doona-openwrt.patch#' $(PKG_BUILD_DIR)/doona/SOURCE
+	$(INSTALL_DIR) $(PKG_BUILD_DIR)/licenses/honk-doona
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/doona/LICENSE $(PKG_BUILD_DIR)/licenses/honk-doona/LICENSE
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/doona/NOTICE $(PKG_BUILD_DIR)/licenses/honk-doona/NOTICE
+	$(INSTALL_DATA) $(PKG_BUILD_DIR)/doona/THIRD-PARTY-NOTICES.txt $(PKG_BUILD_DIR)/licenses/honk-doona/THIRD-PARTY-NOTICES.txt
+	$(INSTALL_DIR) $(PKG_BUILD_DIR)/licenses/honk-doona/LICENSES
+	$(CP) $(PKG_BUILD_DIR)/doona/LICENSES/* $(PKG_BUILD_DIR)/licenses/honk-doona/LICENSES/
 endef
 
 define Build/Compile
@@ -81,6 +109,11 @@ define Package/honk/install
 
 	$(INSTALL_DIR) $(1)/usr/share/licenses/honk
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/LICENSE $(1)/usr/share/licenses/honk/LICENSE
+
+	$(INSTALL_DIR) $(1)/usr/share/doona
+	$(CP) $(PKG_BUILD_DIR)/doona/* $(1)/usr/share/doona/
+	$(INSTALL_DIR) $(1)/usr/share/licenses/honk-doona
+	$(CP) $(PKG_BUILD_DIR)/licenses/honk-doona/* $(1)/usr/share/licenses/honk-doona/
 
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) $(CURDIR)/files/honk.config $(1)/etc/config/honk
@@ -99,10 +132,16 @@ define Package/honk/install
 
 	$(INSTALL_DIR) $(1)/usr/share/honk
 	$(INSTALL_DATA) $(CURDIR)/files/config.dae $(1)/usr/share/honk/default-config.dae
-	$(INSTALL_DATA) $(CURDIR)/generated-provenance.json $(1)/usr/share/honk/provenance.json
+	@if [ -f $(CURDIR)/generated-provenance.json ]; then \
+		$(INSTALL_DATA) $(CURDIR)/generated-provenance.json $(1)/usr/share/honk/provenance.json ; \
+	else \
+		echo '{"source":"local-build"}' > $(1)/usr/share/honk/provenance.json ; \
+	fi
 	$(INSTALL_BIN) $(CURDIR)/files/control.sh $(1)/usr/share/honk/control.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lock.sh $(1)/usr/share/honk/lock.sh
+	$(INSTALL_BIN) $(CURDIR)/files/runtime-dir.sh $(1)/usr/share/honk/runtime-dir.sh
 	$(INSTALL_BIN) $(CURDIR)/files/firewall.sh $(1)/usr/share/honk/firewall.sh
+	$(INSTALL_BIN) $(CURDIR)/files/kernel.sh $(1)/usr/share/honk/kernel.sh
 	$(INSTALL_BIN) $(CURDIR)/files/lifecycle.sh $(1)/usr/share/honk/lifecycle.sh
 	$(INSTALL_BIN) $(CURDIR)/files/maintenance.sh $(1)/usr/share/honk/maintenance.sh
 	$(INSTALL_BIN) $(CURDIR)/files/job.sh $(1)/usr/share/honk/job.sh
@@ -110,6 +149,11 @@ define Package/honk/install
 	$(INSTALL_BIN) $(CURDIR)/files/redact-log.sh $(1)/usr/share/honk/redact-log.sh
 	$(INSTALL_BIN) $(CURDIR)/files/log-level-filter.sh $(1)/usr/share/honk/log-level-filter.sh
 	$(INSTALL_DATA) $(CURDIR)/files/log-lines.sh $(1)/usr/share/honk/log-lines.sh
+	# The fallback panel: the core refuses to start when the configured ui
+	# directory has no index.html, so a missing panel may not take the
+	# service down with it.
+	$(INSTALL_DIR) $(1)/usr/share/honk/ui
+	$(INSTALL_DATA) $(CURDIR)/files/ui/index.html $(1)/usr/share/honk/ui/index.html
 endef
 
 define Package/honk/postinst
@@ -134,12 +178,13 @@ endef
 define Package/honk/postrm
 #!/bin/sh
 # postrm runs after the package files are removed, so it must not source
-# /usr/share/honk/firewall.sh. Keep the two UCI section names in sync with
-# files/firewall.sh.
+# /usr/share/honk/firewall.sh. The rule names follow the prefix used there:
+# besides the lan and wan rules, every other zone gets its own reject rule.
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 if command -v uci >/dev/null 2>&1; then
-	uci -q delete firewall.honk_native_api_lan
-	uci -q delete firewall.honk_native_api_wan
+	for section in $$(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(honk_native_api[a-z0-9_]*\)=.*/\1/p"); do
+		uci -q delete "firewall.$$section"
+	done
 	uci commit firewall || :
 	/etc/init.d/firewall reload >/dev/null 2>&1 || :
 fi

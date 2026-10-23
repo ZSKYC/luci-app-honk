@@ -170,6 +170,9 @@ return view.extend({
 				const reason = !status.initialized ? _('Complete initial setup before opening Doona.') :
 					!running ? _('Start Honk to open Doona.') : _('Doona is not ready yet. Check the service status.');
 				statusCard.appendChild(E('p', { 'class': 'honk-note', 'role': 'status' }, reason));
+			} else if (status.panel_available === false) {
+				statusCard.appendChild(E('p', { 'class': 'honk-note', 'role': 'status' },
+					_('The Doona panel assets are missing. The service runs, but the panel shows a placeholder. Reinstall the honk package.')));
 			}
 
 			const errors = (Array.isArray(status.errors) ? status.errors : []).filter(function(token) {

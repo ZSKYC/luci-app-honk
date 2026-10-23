@@ -9,12 +9,8 @@ PKG_VERSION:=2026.10.21
 PKG_RELEASE:=1
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
-PKG_SOURCE:=doona-6acdabdc-6fb5fec490b6.tar.gz
-PKG_SOURCE_URL:=https://github.com/szwjp/luci-app-honk/releases/download/staging
-PKG_SOURCE_SUBDIR:=doona
-PKG_HASH:=6fb5fec490b6e86604d8ae4b07d872896639d9e1d744adb6fb2394cbe3ef34b3
-
--include $(CURDIR)/generated-doona-stage.mk
+# The Doona panel lives in the honk package: the core serves it from
+# /usr/share/doona, and the service must not depend on this package.
 
 PKG_BUILD_DEPENDS:=luci-base/host
 
@@ -36,15 +32,7 @@ define Package/luci-app-honk/description
 endef
 
 define Build/Prepare
-	mkdir -p $(PKG_BUILD_DIR)/root/usr/share/doona
-	$(TAR) --strip-components=1 -C $(PKG_BUILD_DIR)/root/usr/share/doona -xzf $(DL_DIR)/$(PKG_SOURCE)
-	$(SED) 's#^Build patch: .*#Build patch: ci/patches/doona-openwrt.patch#' $(PKG_BUILD_DIR)/root/usr/share/doona/SOURCE
-	$(INSTALL_DIR) $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/root/usr/share/doona/LICENSE $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/LICENSE
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/root/usr/share/doona/NOTICE $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/NOTICE
-	$(INSTALL_DATA) $(PKG_BUILD_DIR)/root/usr/share/doona/THIRD-PARTY-NOTICES.txt $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/THIRD-PARTY-NOTICES.txt
-	$(INSTALL_DIR) $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/LICENSES
-	$(CP) $(PKG_BUILD_DIR)/root/usr/share/doona/LICENSES/* $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/LICENSES/
+	mkdir -p $(PKG_BUILD_DIR)
 	po2lmo ./po/zh-cn/honk.po $(PKG_BUILD_DIR)/honk.zh-cn.lmo
 endef
 
@@ -69,16 +57,12 @@ define Package/luci-app-honk/install
 	$(INSTALL_DATA) ./root/usr/share/luci/menu.d/luci-app-honk.json $(1)/usr/share/luci/menu.d/luci-app-honk.json
 
 	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
-	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-honk.json $(1)/usr/share/rpcd/acl.d/luci-app-honk.json
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-honk-read.json $(1)/usr/share/rpcd/acl.d/luci-app-honk-read.json
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-honk-admin.json $(1)/usr/share/rpcd/acl.d/luci-app-honk-admin.json
 
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/honk
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/honk/*.js $(1)/www/luci-static/resources/view/honk/
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/honk/*.css $(1)/www/luci-static/resources/view/honk/
-
-	$(INSTALL_DIR) $(1)/usr/share/doona
-	$(CP) $(PKG_BUILD_DIR)/root/usr/share/doona/* $(1)/usr/share/doona/
-	$(INSTALL_DIR) $(1)/usr/share/licenses/honk-doona
-	$(CP) $(PKG_BUILD_DIR)/root/usr/share/licenses/honk-doona/* $(1)/usr/share/licenses/honk-doona/
 
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
 	$(INSTALL_DATA) $(PKG_BUILD_DIR)/honk.zh-cn.lmo $(1)/usr/lib/lua/luci/i18n/honk.zh-cn.lmo
